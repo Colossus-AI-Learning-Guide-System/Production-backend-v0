@@ -1,0 +1,4 @@
+after installing cuda installed toarch with cuda enabled for the installed cuda version -
+ pip uninstall torch torchvision torchaudio -y --> uninstall current toarch version 
+ pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126  --> install toarch with cuda enabled (cu126 for cuda 12.6)
+ python -c "import torch; print(torch.__version__); print(torch.version.cuda)" --> Check whether the cuda with toarch is correctly installed

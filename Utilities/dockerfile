@@ -1,0 +1,35 @@
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=off \
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    PIP_DEFAULT_TIMEOUT=100 \
+    PATH="/root/.local/bin:$PATH" \
+    CUDA_HOME="/usr/local/cuda"
+
+WORKDIR /byaldi
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Colombo
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ninja-build \
+    git \
+    cuda-toolkit-12-1 \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+
+COPY pyproject.toml .
+
+RUN pip install --upgrade pip \
+    && pip install setuptools \
+    && pip install --upgrade byaldi \
+    && pip install flash-attn --no-build-isolation \
+    && pip install --no-cache-dir .
+
+COPY . .
+
+EXPOSE 5001
+
+CMD ["python", "app.py"]

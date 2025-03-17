@@ -1,0 +1,15 @@
+colpali-engine>=0.3.4,<0.4.0
+ml-dtypes
+mteb==1.6.35
+ninja
+pdf2image
+byaldi
+srsly
+torch
+flask
+flask_cors
+claudette
+PyPDF2
+transformers>=4.42.0
+PyMuPDF
+neo4j
