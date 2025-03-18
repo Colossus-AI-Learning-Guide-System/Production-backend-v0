@@ -9,6 +9,7 @@ import tempfile
 import uuid
 from typing import Dict, List, Optional, Any
 from neo4j import GraphDatabase
+from datetime import datetime
 
 class Neo4jDocumentProcessor:
     """
@@ -129,6 +130,20 @@ class Neo4jDocumentProcessor:
             "page_mapping": {},
             "page_images": {}
         }
+        
+        # Try to extract document title from metadata or first page
+        try:
+            if doc.metadata and doc.metadata.get('title'):
+                structure["title"] = doc.metadata.get('title')
+            else:
+                # Try to extract title from first page
+                first_page_text = reader.pages[0].extract_text()
+                first_lines = first_page_text.split('\n')
+                if first_lines and len(first_lines[0]) < 100:  # Reasonable title length
+                    structure["title"] = first_lines[0].strip()
+        except Exception as e:
+            print(f"Error extracting document title: {str(e)}")
+            # Default title will be set in _store_document_structure
         
         # Pattern to identify headings (customize based on your documents)
         heading_patterns = [
@@ -256,10 +271,24 @@ class Neo4jDocumentProcessor:
             structure: Document structure dictionary
         """
         with self.driver.session() as session:
-            # Create document node
+            # Create document node with additional metadata
+            title = structure.get("title", f"Document {document_id[:8]}")
+            upload_date = datetime.now().isoformat()
+            page_count = len(structure["page_images"])
+            
             session.run(
-                "CREATE (d:Document {id: $id})",
-                id=document_id
+                """
+                CREATE (d:Document {
+                    id: $id, 
+                    title: $title, 
+                    upload_date: $upload_date,
+                    page_count: $page_count
+                })
+                """,
+                id=document_id,
+                title=title,
+                upload_date=upload_date,
+                page_count=page_count
             )
             
             # Create page nodes and connect to document
@@ -325,12 +354,15 @@ class Neo4jDocumentProcessor:
             Document structure dictionary
         """
         with self.driver.session() as session:
-            # Get all headings and their subheadings
+            # Get all headings, subheadings, and page images
             result = session.run(
                 """
                 MATCH (d:Document {id: $doc_id})-[:HAS_HEADING]->(h:Heading {type: 'main'})
                 OPTIONAL MATCH (h)-[:HAS_SUBHEADING]->(s:Heading)
-                RETURN h.text as heading, collect(s.text) as subheadings
+                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
+                RETURN h.text as heading, 
+                       collect(s.text) as subheadings,
+                       collect({number: p.number, image: p.image}) as pages
                 ORDER BY h.text
                 """,
                 doc_id=document_id
@@ -338,15 +370,22 @@ class Neo4jDocumentProcessor:
             
             structure = {
                 "headings": [],
-                "hierarchy": {}
+                "hierarchy": {},
+                "page_images": {}
             }
             
             for record in result:
                 heading = record["heading"]
                 subheadings = record["subheadings"]
+                pages = record["pages"]
                 
                 structure["headings"].append(heading)
                 structure["hierarchy"][heading] = [s for s in subheadings if s is not None]
+                
+                # Add page images to the structure
+                for page in pages:
+                    if page["number"] is not None and page["image"] is not None:
+                        structure["page_images"][page["number"]] = page["image"]
             
             return structure
     
@@ -400,6 +439,30 @@ class Neo4jDocumentProcessor:
             
             return [record["document_id"] for record in result]
     
+    def get_all_documents_with_metadata(self) -> List[Dict[str, Any]]:
+        """
+        Get a list of all documents with metadata.
+        
+        Returns:
+            List of document dictionaries with id and metadata
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (d:Document)
+                OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
+                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
+                RETURN d.id as document_id, 
+                       d.title as title,
+                       d.upload_date as upload_date,
+                       count(DISTINCT h) as heading_count,
+                       count(DISTINCT p) as page_count
+                GROUP BY d.id, d.title, d.upload_date
+                """
+            )
+            
+            return [dict(record) for record in result]
+    
     def clear_document(self, document_id: str) -> bool:
         """
         Delete a document and all its related nodes from Neo4j.
@@ -435,3 +498,34 @@ class Neo4jDocumentProcessor:
             )
             
             return True
+    
+    def get_page_image(self, document_id: str, page_number: int) -> Dict[str, Any]:
+        """
+        Get the image data for a specific page.
+        
+        Args:
+            document_id: ID of the document
+            page_number: Page number to retrieve
+            
+        Returns:
+            Dictionary containing page image data
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (d:Document {id: $doc_id})-[:HAS_PAGE]->(p:Page {number: $page_number})
+                RETURN p.image as image
+                """,
+                doc_id=document_id,
+                page_number=page_number
+            )
+            
+            record = result.single()
+            if not record:
+                raise KeyError(f"Page {page_number} not found in document")
+            
+            return {
+                "page_number": page_number,
+                "image": record["image"]
+            }
+        

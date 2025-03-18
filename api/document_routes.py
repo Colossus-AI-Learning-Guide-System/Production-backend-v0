@@ -167,3 +167,40 @@ def delete_document(document_id):
         print(f"Error in delete_document: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@document_bp.route('/documents-with-metadata', methods=['GET'])
+def get_documents_with_metadata():
+    """Get all documents with metadata"""
+    try:
+        # Get document processor from your service
+        document_processor = get_document_processor()  # Adjust based on your implementation
+        
+        # Get documents with metadata
+        documents = document_processor.get_all_documents_with_metadata()
+        
+        return jsonify(documents)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@document_bp.route('/document/<document_id>/page/<int:page_number>', methods=['GET'])
+def get_document_page(document_id, page_number):
+    """Get a specific page image for a document"""
+    try:
+        document_processor = get_document_processor()
+        page_data = document_processor.get_page_image(document_id, page_number)
+        return jsonify(page_data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@document_bp.route('/document/<document_id>/heading/<heading>', methods=['GET'])
+def get_document_heading_page(document_id, heading):
+    """Get the page image for a specific heading"""
+    try:
+        document_processor = get_document_processor()
+        heading_data = document_processor.get_heading_page(document_id, heading)
+        return jsonify(heading_data)
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_document_heading_page: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
