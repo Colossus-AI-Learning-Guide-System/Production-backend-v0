@@ -1,0 +1,3 @@
+ Necessary methods for retrieving page images and visual references
+/document/<document_id>/page/<int:page_number> API endpoint to fetch page images
+/document/<document_id>/visual/<reference> API endpoint to retrieve visual references with their page images

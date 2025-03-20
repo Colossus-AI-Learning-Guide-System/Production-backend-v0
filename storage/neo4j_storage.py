@@ -706,37 +706,75 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
             
             return structure
     
-    def get_heading_page(self, document_id: str, heading: str) -> Dict[str, Any]:
+    def get_page_image(self, document_id: str, page_number: int) -> Dict[str, Any]:
         """
-        Get the page image for a specific heading.
+        Get a specific page image from a document.
         
         Args:
             document_id: ID of the document
-            heading: The heading text
+            page_number: Page number (0-indexed)
             
         Returns:
-            Dictionary with heading, page number, and page image
+            Dictionary with page image data
         """
         with self.driver.session() as session:
-            # Get page number and image for the heading
-            result = session.run(
+            # Check if document exists
+            doc_result = session.run(
                 """
-                MATCH (d:Document {id: $doc_id})-[:HAS_HEADING]->(h:Heading {text: $heading})-[:APPEARS_ON]->(p:Page)
-                RETURN p.number as page_num, p.image as page_image
+                MATCH (d:Document {id: $doc_id})
+                RETURN d
+                """,
+                doc_id=document_id
+            ).single()
+            
+            if not doc_result:
+                raise ValueError(f"Document with ID {document_id} not found")
+            
+            # Get page image from the PageImage node
+            page_image_result = session.run(
+                """
+                MATCH (d:Document {id: $doc_id})-[:HAS_PAGE]->(p:Page {number: $page_num})
+                MATCH (p)-[:HAS_IMAGE]->(pi:PageImage)
+                RETURN pi.base64 AS image
                 """,
                 doc_id=document_id,
-                heading=heading
-            )
+                page_num=page_number
+            ).single()
             
-            record = result.single()
-            
-            if not record:
-                raise KeyError(f"Heading '{heading}' not found in document")
+            if not page_image_result:
+                # Try alternative query without PageImage node
+                # This handles cases where the image is stored directly on the Page node
+                page_result = session.run(
+                    """
+                    MATCH (d:Document {id: $doc_id})-[:HAS_PAGE]->(p:Page {number: $page_num})
+                    RETURN p.image AS image
+                    """,
+                    doc_id=document_id,
+                    page_num=page_number
+                ).single()
+                
+                if not page_result:
+                    # Last resort: try to get from document structure
+                    structure = self.get_document_structure(document_id)
+                    if "page_images" in structure and page_number in structure["page_images"]:
+                        return {
+                            "image": structure["page_images"][page_number],
+                            "page_number": page_number,
+                            "document_id": document_id
+                        }
+                    else:
+                        raise ValueError(f"Page {page_number} not found for document {document_id}")
+                
+                return {
+                    "image": page_result["image"],
+                    "page_number": page_number,
+                    "document_id": document_id
+                }
             
             return {
-                "heading": heading,
-                "page_number": record["page_num"],
-                "page_image": record["page_image"]
+                "image": page_image_result["image"],
+                "page_number": page_number,
+                "document_id": document_id
             }
     
     def get_all_documents(self) -> List[str]:
@@ -878,36 +916,6 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 )
             
             return True
-    
-    def get_page_image(self, document_id: str, page_number: int) -> Dict[str, Any]:
-        """
-        Get the image data for a specific page.
-        
-        Args:
-            document_id: ID of the document
-            page_number: Page number to retrieve
-            
-        Returns:
-            Dictionary containing page image data
-        """
-        with self.driver.session() as session:
-            result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})-[:HAS_PAGE]->(p:Page {number: $page_number})
-                RETURN p.image as image
-                """,
-                doc_id=document_id,
-                page_number=page_number
-            )
-            
-            record = result.single()
-            if not record:
-                raise KeyError(f"Page {page_number} not found in document")
-            
-            return {
-                "page_number": page_number,
-                "image": record["image"]
-            }
     
     def get_document_metadata(self, document_id: str) -> Dict[str, Any]:
         """

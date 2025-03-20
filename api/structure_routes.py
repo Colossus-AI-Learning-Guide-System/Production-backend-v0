@@ -129,16 +129,78 @@ def get_document_structured_content(document_id):
         print(f"Error in get_document_structured_content: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@structure_bp.route('/document/<document_id>/page/<int:page_number>', methods=['GET'])
+def get_document_page(document_id, page_number):
+    """
+    Get a page image for a document.
+    
+    Args:
+        document_id: Document ID
+        page_number: Page number (1-indexed in URL, converted to 0-indexed for storage)
+        
+    Returns:
+        JSON with page image data
+    """
+    try:
+        document_processor = get_document_processor()
+        # Convert from 1-indexed (API) to 0-indexed (storage)
+        page_data = document_processor.get_page_image(document_id, page_number - 1)
+        return jsonify(page_data), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_document_page: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 @structure_bp.route('/document/<document_id>/visual/<reference>', methods=['GET'])
 def get_document_visual_reference(document_id, reference):
     """
     Get a visual reference by its reference ID.
+    
+    This endpoint retrieves the page image containing the visual reference
+    and returns information needed to display it.
+    
+    Args:
+        document_id: Document ID
+        reference: Visual reference ID (e.g., "image_001")
+        
+    Returns:
+        JSON with visual reference data including the page image
     """
     try:
         document_processor = get_document_processor()
-        visual_data = document_processor.get_visual_reference(document_id, reference)
-        return jsonify(visual_data), 200
-    except KeyError as e:
+        
+        # Get the structured content to find the visual reference
+        structured_content = document_processor.get_structured_content(document_id)
+        
+        # Find the visual reference in the structured content
+        visual_ref = None
+        for heading in structured_content["document_structure"]:
+            for subheading in heading["subheadings"]:
+                for visual in subheading.get("visual_references", []):
+                    if visual["image_reference"] == reference:
+                        visual_ref = visual
+                        break
+                if visual_ref:
+                    break
+            if visual_ref:
+                break
+        
+        if not visual_ref:
+            return jsonify({"error": f"Visual reference '{reference}' not found"}), 404
+        
+        # Get the page image for this visual reference
+        page_num = visual_ref["page_reference"] - 1  # Convert to 0-indexed
+        page_data = document_processor.get_page_image(document_id, page_num)
+        
+        # Return the visual reference data with the page image
+        return jsonify({
+            "visual_reference": visual_ref,
+            "page_image": page_data["image"],
+            "document_id": document_id
+        }), 200
+        
+    except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         print(f"Error in get_document_visual_reference: {str(e)}")
