@@ -113,3 +113,33 @@ def delete_document_structure(document_id):
     except Exception as e:
         print(f"Error in delete_document_structure: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@structure_bp.route('/document/<document_id>/structured', methods=['GET'])
+def get_document_structured_content(document_id):
+    """
+    Get structured content for a document.
+    """
+    try:
+        document_processor = get_document_processor()
+        structured_content = document_processor.get_structured_content(document_id)
+        return jsonify(structured_content), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_document_structured_content: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@structure_bp.route('/document/<document_id>/visual/<reference>', methods=['GET'])
+def get_document_visual_reference(document_id, reference):
+    """
+    Get a visual reference by its reference ID.
+    """
+    try:
+        document_processor = get_document_processor()
+        visual_data = document_processor.get_visual_reference(document_id, reference)
+        return jsonify(visual_data), 200
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_document_visual_reference: {str(e)}")
+        return jsonify({"error": str(e)}), 500
