@@ -83,3 +83,33 @@ def get_heading_page(document_id):
     except Exception as e:
         print("Error in get_heading_page:", str(e))
         return jsonify({"error": str(e)}), 500
+
+@structure_bp.route('/document/<document_id>', methods=['DELETE'])
+def delete_document_structure(document_id):
+    """
+    Delete a document and its structure from Neo4j.
+    This endpoint focuses only on the document structure in Neo4j, not the RAG index.
+    """
+    try:
+        document_processor = get_document_processor()
+        success = document_processor.clear_document(document_id)
+        
+        # Clean up any orphaned nodes that might remain
+        if success:
+            orphaned_deleted = document_processor.clean_orphaned_nodes()
+            if orphaned_deleted > 0:
+                print(f"Cleaned up {orphaned_deleted} orphaned nodes after document structure deletion")
+        
+        if success:
+            return jsonify({
+                "message": f"Document {document_id} structure deleted successfully",
+                "details": {"neo4j_deletion": "successful"}
+            }), 200
+        else:
+            return jsonify({
+                "error": f"Document {document_id} not found",
+                "details": {"neo4j_deletion": "failed or not found"}
+            }), 404
+    except Exception as e:
+        print(f"Error in delete_document_structure: {str(e)}")
+        return jsonify({"error": str(e)}), 500

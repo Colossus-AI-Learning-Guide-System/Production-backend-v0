@@ -26,6 +26,7 @@ def unified_upload():
         print("Received unified upload request")
         data = request.json
         file_base64 = data.get('file', '')
+        filename = data.get('filename', '')  # Get the original filename
         
         if not file_base64:
             return jsonify({"error": "No file provided"}), 400
@@ -44,7 +45,7 @@ def unified_upload():
             # 1. Process for document structure visualization FIRST
             print("Processing document structure...")
             document_processor = get_document_processor()
-            document_id = document_processor.process_document(temp_file_path)
+            document_id = document_processor.process_document(temp_file_path, original_filename=filename)
             
             # Get the document structure immediately
             document_structure = document_processor.get_document_structure(document_id)
@@ -152,17 +153,36 @@ def delete_document(document_id):
         # Import the RAG model from app context
         from app import rag_model
         
-        # Delete from Neo4j
+        # Delete from Neo4j with cascading delete
         document_processor = get_document_processor()
-        success = document_processor.clear_document(document_id)
+        neo4j_success = document_processor.clear_document(document_id)
         
         # Delete RAG index
-        delete_success = delete_document_index(document_id, rag_model)
+        rag_success = delete_document_index(document_id, rag_model)
         
-        if success or delete_success:
-            return jsonify({"message": f"Document {document_id} deleted successfully"}), 200
+        # Log the deletion status
+        results = {
+            "neo4j_deletion": "successful" if neo4j_success else "failed or not found",
+            "rag_deletion": "successful" if rag_success else "failed or not found",
+        }
+        print(f"Document deletion results for {document_id}: {results}")
+        
+        # Clean up any orphaned nodes that might remain
+        if neo4j_success:
+            orphaned_deleted = document_processor.clean_orphaned_nodes()
+            if orphaned_deleted > 0:
+                print(f"Cleaned up {orphaned_deleted} orphaned nodes after document deletion")
+        
+        if neo4j_success or rag_success:
+            return jsonify({
+                "message": f"Document {document_id} deleted successfully",
+                "details": results
+            }), 200
         else:
-            return jsonify({"error": f"Document {document_id} not found"}), 404
+            return jsonify({
+                "error": f"Document {document_id} not found",
+                "details": results
+            }), 404
     except Exception as e:
         print(f"Error in delete_document: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -172,7 +192,7 @@ def get_documents_with_metadata():
     """Get all documents with metadata"""
     try:
         # Get document processor from your service
-        document_processor = get_document_processor()  # Adjust based on your implementation
+        document_processor = get_document_processor()
         
         # Get documents with metadata
         documents = document_processor.get_all_documents_with_metadata()
@@ -202,5 +222,18 @@ def get_document_heading_page(document_id, heading):
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         print(f"Error in get_document_heading_page: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@document_bp.route('/document/<document_id>/metadata', methods=['GET'])
+def get_document_metadata(document_id):
+    """Get metadata for a specific document"""
+    try:
+        document_processor = get_document_processor()
+        metadata = document_processor.get_document_metadata(document_id)
+        return jsonify(metadata)
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_document_metadata: {str(e)}")
         return jsonify({"error": str(e)}), 500
 

@@ -31,12 +31,13 @@ class Neo4jDocumentProcessor:
         """Close the Neo4j driver connection."""
         self.driver.close()
     
-    def process_document(self, pdf_path: str) -> str:
+    def process_document(self, pdf_path: str, original_filename: str = None) -> str:
         """
         Process a PDF document and store its structure in Neo4j.
         
         Args:
             pdf_path: Path to the PDF file
+            original_filename: Original filename (optional)
             
         Returns:
             document_id: Unique identifier for the processed document
@@ -54,8 +55,22 @@ class Neo4jDocumentProcessor:
             # Use PyMuPDF for rendering pages
             doc = fitz.open(pdf_path)
             
+            # Store original filename as a property of the document object
+            if original_filename:
+                # Create a temporary attribute to store the original filename
+                doc._original_filename = original_filename
+                print(f"Using original filename: {original_filename}")
+            
             # Process document structure
             structure = self._extract_document_structure(reader, doc)
+            
+            # Override title with original filename if provided
+            if original_filename:
+                filename_without_ext = os.path.splitext(original_filename)[0]
+                structure["title"] = filename_without_ext
+                structure["metadata"]["title"] = structure["title"]
+                print(f"Title set to original filename: {structure['title']}")
+            
             print(f"Extracted {len(structure['headings'])} headings")
             
             # Store structure in Neo4j
@@ -128,22 +143,82 @@ class Neo4jDocumentProcessor:
             "headings": [],
             "hierarchy": {},
             "page_mapping": {},
-            "page_images": {}
+            "page_images": {},
+            "metadata": {}  # New metadata dictionary
         }
         
-        # Try to extract document title from metadata or first page
+        # Extract filename as title
         try:
-            if doc.metadata and doc.metadata.get('title'):
-                structure["title"] = doc.metadata.get('title')
+            # Get the filename from the document path
+            if hasattr(doc, 'name') and doc.name:
+                file_path = doc.name
+                file_name = os.path.basename(file_path)
+                # Remove extension
+                file_name_without_ext = os.path.splitext(file_name)[0]
+                structure["title"] = file_name_without_ext
+                structure["metadata"]["title"] = structure["title"]
+                print(f"Using filename as title: {structure['title']}")
             else:
-                # Try to extract title from first page
-                first_page_text = reader.pages[0].extract_text()
-                first_lines = first_page_text.split('\n')
-                if first_lines and len(first_lines[0]) < 100:  # Reasonable title length
-                    structure["title"] = first_lines[0].strip()
+                # Fallback to extracting from PDF metadata or content
+                if doc.metadata and doc.metadata.get('title'):
+                    structure["title"] = doc.metadata.get('title')
+                    structure["metadata"]["title"] = structure["title"]
+                else:
+                    # Try to extract title from first page
+                    first_page_text = reader.pages[0].extract_text()
+                    first_lines = first_page_text.split('\n')
+                    if first_lines and len(first_lines[0]) < 100:  # Reasonable title length
+                        structure["title"] = first_lines[0].strip()
+                        structure["metadata"]["title"] = structure["title"]
         except Exception as e:
-            print(f"Error extracting document title: {str(e)}")
-            # Default title will be set in _store_document_structure
+            print(f"Error extracting document title from filename: {str(e)}")
+            # Fallback to a default title
+            structure["title"] = f"Document {uuid.uuid4().hex[:8]}"
+            structure["metadata"]["title"] = structure["title"]
+        
+        # Extract document file size
+        try:
+            structure["metadata"]["file_size"] = os.path.getsize(doc.name)
+            structure["metadata"]["file_size_kb"] = round(structure["metadata"]["file_size"] / 1024, 2)
+        except Exception as e:
+            print(f"Error extracting file size: {str(e)}")
+            structure["metadata"]["file_size"] = 0
+            structure["metadata"]["file_size_kb"] = 0
+        
+        # Extract metadata from PDF
+        try:
+            # Extract additional metadata
+            if doc.metadata:
+                # Author information
+                structure["metadata"]["author"] = doc.metadata.get('author', 'Unknown')
+                
+                # Creation date
+                creation_date = doc.metadata.get('creationDate', None)
+                if creation_date:
+                    # Try to parse PDF date format (D:YYYYMMDDHHmmSS)
+                    if isinstance(creation_date, str) and creation_date.startswith('D:'):
+                        date_str = creation_date[2:16]  # Extract YYYYMMDDHHMMSS
+                        try:
+                            from datetime import datetime
+                            parsed_date = datetime.strptime(date_str, '%Y%m%d%H%M%S')
+                            structure["metadata"]["creation_date"] = parsed_date.isoformat()
+                        except:
+                            structure["metadata"]["creation_date"] = creation_date
+                    else:
+                        structure["metadata"]["creation_date"] = creation_date
+                
+                # Keywords or subject
+                structure["metadata"]["keywords"] = doc.metadata.get('keywords', '')
+                structure["metadata"]["subject"] = doc.metadata.get('subject', '')
+                
+                # Producer and creator applications
+                structure["metadata"]["producer"] = doc.metadata.get('producer', '')
+                structure["metadata"]["creator"] = doc.metadata.get('creator', '')
+        except Exception as e:
+            print(f"Error extracting document metadata: {str(e)}")
+        
+        # Store page count
+        structure["metadata"]["page_count"] = len(reader.pages)
         
         # Pattern to identify headings (customize based on your documents)
         heading_patterns = [
@@ -271,24 +346,44 @@ class Neo4jDocumentProcessor:
             structure: Document structure dictionary
         """
         with self.driver.session() as session:
-            # Create document node with additional metadata
+            # Create document node with enhanced metadata
             title = structure.get("title", f"Document {document_id[:8]}")
             upload_date = datetime.now().isoformat()
-            page_count = len(structure["page_images"])
+            metadata = structure.get("metadata", {})
             
+            # Create a parameters dictionary for the Neo4j query
+            document_params = {
+                "id": document_id,
+                "title": title,
+                "upload_date": upload_date,
+                "page_count": metadata.get("page_count", len(structure["page_images"])),
+                "file_size_kb": metadata.get("file_size_kb", 0),
+                "author": metadata.get("author", "Unknown"),
+                "creation_date": metadata.get("creation_date", None),
+                "keywords": metadata.get("keywords", ""),
+                "subject": metadata.get("subject", ""),
+                "producer": metadata.get("producer", ""),
+                "creator": metadata.get("creator", "")
+            }
+            
+            # Create document node with all metadata
             session.run(
                 """
                 CREATE (d:Document {
                     id: $id, 
                     title: $title, 
                     upload_date: $upload_date,
-                    page_count: $page_count
+                    page_count: $page_count,
+                    file_size_kb: $file_size_kb,
+                    author: $author,
+                    creation_date: $creation_date,
+                    keywords: $keywords,
+                    subject: $subject,
+                    producer: $producer,
+                    creator: $creator
                 })
                 """,
-                id=document_id,
-                title=title,
-                upload_date=upload_date,
-                page_count=page_count
+                **document_params
             )
             
             # Create page nodes and connect to document
@@ -452,12 +547,20 @@ class Neo4jDocumentProcessor:
                 MATCH (d:Document)
                 OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
                 OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
+                WITH d, 
+                     count(DISTINCT h) as heading_count,
+                     count(DISTINCT p) as actual_page_count
                 RETURN d.id as document_id, 
                        d.title as title,
                        d.upload_date as upload_date,
-                       count(DISTINCT h) as heading_count,
-                       count(DISTINCT p) as page_count
-                GROUP BY d.id, d.title, d.upload_date
+                       d.page_count as page_count,
+                       d.file_size_kb as file_size_kb,
+                       d.author as author,
+                       d.creation_date as creation_date,
+                       d.keywords as keywords,
+                       d.subject as subject,
+                       heading_count,
+                       actual_page_count
                 """
             )
             
@@ -486,16 +589,71 @@ class Neo4jDocumentProcessor:
             if result.single()["doc_count"] == 0:
                 return False
                 
-            # Delete all related nodes and relationships
-            session.run(
+            # First count all nodes to be deleted for verification
+            count_result = session.run(
                 """
                 MATCH (d:Document {id: $doc_id})
-                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
-                OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
-                DETACH DELETE d, p, h
+                OPTIONAL MATCH (d)-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
+                RETURN count(DISTINCT n) as related_node_count
                 """,
                 doc_id=document_id
             )
+            related_node_count = count_result.single()["related_node_count"]
+            
+            # Delete all related nodes first
+            session.run(
+                """
+                MATCH (d:Document {id: $doc_id})-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
+                DETACH DELETE n
+                """,
+                doc_id=document_id
+            )
+            
+            # Then delete the document node
+            delete_result = session.run(
+                """
+                MATCH (d:Document {id: $doc_id})
+                DETACH DELETE d
+                RETURN count(d) as deleted_count
+                """,
+                doc_id=document_id
+            )
+            
+            deleted_count = delete_result.single()["deleted_count"]
+            print(f"Deleted document {document_id} with {related_node_count} related nodes")
+            
+            # Verify no orphaned nodes remain by checking for any nodes that were connected to this document
+            verify_result = session.run(
+                """
+                MATCH (n)
+                WHERE EXISTS {
+                    MATCH (n)-[r]-()
+                    WHERE type(r) IN ['HAS_PAGE', 'HAS_HEADING', 'HAS_SUBHEADING', 'APPEARS_ON', 'CONTAINS']
+                      AND NOT EXISTS {
+                        MATCH (d:Document)-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
+                      }
+                }
+                RETURN count(n) as orphan_count
+                """
+            )
+            
+            orphan_count = verify_result.single()["orphan_count"]
+            if orphan_count > 0:
+                print(f"Warning: Found {orphan_count} orphaned nodes after deletion")
+                # Perform cleanup of orphaned nodes if found
+                session.run(
+                    """
+                    MATCH (n)
+                    WHERE EXISTS {
+                        MATCH (n)-[r]-()
+                        WHERE type(r) IN ['HAS_PAGE', 'HAS_HEADING', 'HAS_SUBHEADING', 'APPEARS_ON', 'CONTAINS']
+                          AND NOT EXISTS {
+                            MATCH (d:Document)-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
+                          }
+                    }
+                    DETACH DELETE n
+                    """
+                )
             
             return True
     
@@ -528,4 +686,83 @@ class Neo4jDocumentProcessor:
                 "page_number": page_number,
                 "image": record["image"]
             }
+    
+    def get_document_metadata(self, document_id: str) -> Dict[str, Any]:
+        """
+        Get metadata for a specific document.
+        
+        Args:
+            document_id: ID of the document
+            
+        Returns:
+            Dictionary containing document metadata
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (d:Document {id: $doc_id})
+                OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
+                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
+                RETURN d.id as document_id,
+                       d.title as title,
+                       d.upload_date as upload_date,
+                       d.page_count as page_count,
+                       d.file_size_kb as file_size_kb,
+                       d.author as author,
+                       d.creation_date as creation_date,
+                       d.keywords as keywords,
+                       d.subject as subject,
+                       d.producer as producer,
+                       d.creator as creator,
+                       count(DISTINCT h) as heading_count,
+                       count(DISTINCT p) as actual_page_count
+                """,
+                doc_id=document_id
+            )
+            
+            record = result.single()
+            if not record:
+                raise KeyError(f"Document {document_id} not found")
+            
+            return dict(record)
+    
+    def clean_orphaned_nodes(self) -> int:
+        """
+        Clean up any orphaned nodes in the database.
+        These are nodes that have no connection to any Document node.
+        
+        Returns:
+            The number of orphaned nodes deleted
+        """
+        with self.driver.session() as session:
+            # First, count orphaned nodes
+            count_result = session.run(
+                """
+                MATCH (n) 
+                WHERE (n:Page OR n:Heading) 
+                AND NOT EXISTS {
+                    MATCH (n)<-[:CONTAINS]-(d:Document)
+                }
+                RETURN count(n) as orphan_count
+                """
+            )
+            
+            orphan_count = count_result.single()["orphan_count"]
+            
+            if orphan_count > 0:
+                print(f"Found {orphan_count} orphaned nodes to clean up")
+                
+                # Delete orphaned nodes
+                session.run(
+                    """
+                    MATCH (n) 
+                    WHERE (n:Page OR n:Heading) 
+                    AND NOT EXISTS {
+                        MATCH (n)<-[:CONTAINS]-(d:Document)
+                    }
+                    DETACH DELETE n
+                    """
+                )
+            
+            return orphan_count
         
