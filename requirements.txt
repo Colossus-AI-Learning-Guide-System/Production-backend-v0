@@ -14,3 +14,4 @@ transformers>=4.42.0
 PyMuPDF
 neo4j
 anthropic>=0.15.0
+json5

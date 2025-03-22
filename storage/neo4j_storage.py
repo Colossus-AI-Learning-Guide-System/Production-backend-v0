@@ -68,8 +68,11 @@ class Neo4jDocumentProcessor:
                 doc._original_filename = original_filename
                 print(f"Using original filename: {original_filename}")
             
-            # Process document structure using Claude (no fallback)
-            structure = self._extract_document_structure_with_claude(reader, doc)
+            # Process document structure using Enhanced Claude method
+            structure = self._extract_document_structure_with_enhanced_claude(reader, doc)
+            
+            # Skip the regular structure extraction to save API costs
+            # regular_structure = self._extract_document_structure_with_claude(reader, doc)
             
             # Override title with original filename if provided
             if original_filename:
@@ -78,20 +81,23 @@ class Neo4jDocumentProcessor:
                 structure["metadata"]["title"] = structure["title"]
                 print(f"Title set to original filename: {structure['title']}")
             
-            print(f"Extracted {len(structure['headings'])} headings")
+            print(f"Extracted {len(structure['headings'])} headings from enhanced structure")
+            
+            # Store PDF data for future reprocessing if needed
+            self._store_pdf_data(document_id, pdf_path)
             
             # Store structure in Neo4j
             self._store_document_structure(document_id, structure)
             print(f"Document structure stored in Neo4j with ID: {document_id}")
             
-            # Extract structured content directly from Claude response if available
+            # Extract structured content from the enhanced Claude response
             if "claude_structure" in structure:
-                structured_content = {"document_structure": structure["claude_structure"]["document_structure"]}
-                # Remove the temporary claude_structure from the structure dictionary
+                enhanced_content = {"document_structure": structure["claude_structure"]["document_structure"]}
+                # Remove the temporary claude_structure
                 del structure["claude_structure"]
             else:
-                # Create basic page-based structure if Claude didn't return a proper structure
-                structured_content = {
+                # Create basic structure if enhanced Claude didn't return a proper structure
+                enhanced_content = {
                     "document_structure": [
                         {
                             "heading": structure["title"],
@@ -101,9 +107,25 @@ class Neo4jDocumentProcessor:
                     ]
                 }
             
-            # Store structured content in Neo4j
-            self.store_structured_content(document_id, structured_content)
-            print(f"Structured content extracted and stored with {len(structured_content['document_structure'])} main headings")
+            # Create a copy of the enhanced content for the regular content to maintain backward compatibility
+            regular_content = enhanced_content.copy()
+            
+            # Store structured content in Neo4j (both as regular and enhanced for backward compatibility)
+            self.store_structured_content(document_id, regular_content, is_enhanced=False)
+            self.store_structured_content(document_id, enhanced_content, is_enhanced=True)
+            
+            # Mark the enhanced content timestamp
+            with self.driver.session() as session:
+                session.run(
+                    """
+                    MATCH (d:Document {id: $id})
+                    SET d.enhanced_content_timestamp = $timestamp
+                    """,
+                    id=document_id,
+                    timestamp=datetime.now().isoformat()
+                )
+            
+            print(f"Enhanced structured content extracted and stored with {len(enhanced_content['document_structure'])} main headings")
             
             return document_id
             
@@ -133,8 +155,23 @@ class Neo4jDocumentProcessor:
                 temp_file_path = temp_file.name
             
             try:
+                # Generate a unique ID
+                document_id = str(uuid.uuid4())
+                
                 # Process the PDF file
                 document_id = self.process_document(temp_file_path)
+                
+                # Store the raw PDF data directly
+                with self.driver.session() as session:
+                    session.run(
+                        """
+                        MATCH (d:Document {id: $id})
+                        SET d.pdf_data = $pdf_data
+                        """,
+                        id=document_id,
+                        pdf_data=base64_data
+                    )
+                    
                 return document_id
             finally:
                 # Clean up temporary file
@@ -357,44 +394,32 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 # If Claude didn't find any headings, create a simple structure with the document title
                 if not structure["headings"]:
                     print("WARNING: Claude didn't detect any headings. Creating simple title-based structure.")
-                    title = structure["title"]
-                    structure["headings"].append(title)
-                    structure["hierarchy"][title] = []
-                    structure["page_mapping"][title] = 0
-                        
+                    self._create_simple_structure(structure, reader)
+                
                 # Store the original Claude structure for later use in extracting structured content
                 structure["claude_structure"] = claude_structure
                 
-            except json.JSONDecodeError as e:
-                print(f"Error parsing Claude response as JSON: {str(e)}")
-                print(f"JSON string: {json_str[:500]}...")
-                # Create a basic document structure using the title
-                title = structure["title"]
-                structure["headings"].append(title)
-                structure["hierarchy"][title] = []
-                structure["page_mapping"][title] = 0
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Error parsing Claude response as JSON or missing key: {str(e)}")
+                print(f"JSON string sample: {json_str[:200]}...")
                 
-                # Create a basic Claude structure for return
-                structure["claude_structure"] = {
-                    "document_structure": [
-                        {
-                            "heading": title,
-                            "page_reference": 1,
-                            "subheadings": []
-                        }
-                    ]
-                }
+                # Create a basic document structure using the title and page structure
+                print("Creating fallback document structure from PDF content")
+                self._create_simple_structure(structure, reader)
                 
-                # For each page, add a "Page X" entry
-                for page_num in range(len(reader.pages)):
-                    page_text = reader.pages[page_num].extract_text()
-                    structure["claude_structure"]["document_structure"][0]["subheadings"].append({
-                        "title": f"Page {page_num + 1}",
-                        "context": page_text[:2000] if page_text else "",  # Limit context to 2000 chars
-                        "page_reference": page_num + 1,
-                        "visual_references": []
-                    })
-            
+                # Try to salvage any partial structure from Claude's response
+                try:
+                    fallback_structure = self._create_default_structure_with_partial_content(json_str)
+                    fallback_json = json.loads(fallback_structure)
+                    if fallback_json["document_structure"] and len(fallback_json["document_structure"]) > 1:
+                        print(f"Successfully salvaged partial structure with {len(fallback_json['document_structure'])} headings")
+                        structure["claude_structure"] = fallback_json
+                    else:
+                        structure["claude_structure"] = self._generate_page_based_structure(reader)
+                except Exception as fallback_error:
+                    print(f"Error creating fallback structure: {str(fallback_error)}")
+                    structure["claude_structure"] = self._generate_page_based_structure(reader)
+        
         except Exception as e:
             print(f"Error calling Claude API: {str(e)}")
             # Create a basic document structure using the title
@@ -414,7 +439,352 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 ]
             }
             
-            # For each page, add a "Page X" entry with context
+            # For each page, add a "Page X" entry
+            for page_num in range(len(reader.pages)):
+                page_text = reader.pages[page_num].extract_text()
+                structure["claude_structure"]["document_structure"][0]["subheadings"].append({
+                    "title": f"Page {page_num + 1}",
+                    "context": page_text[:2000] if page_text else "",  # Limit context to 2000 chars
+                    "page_reference": page_num + 1,
+                    "visual_references": []
+                })
+        
+        return structure
+    
+    def _create_simple_structure(self, structure, reader):
+        """Create a simple document structure using the document title and page-based sections"""
+        title = structure["title"]
+        structure["headings"].append(title)
+        structure["hierarchy"][title] = []
+        structure["page_mapping"][title] = 0
+            
+    def _generate_page_based_structure(self, reader):
+        """Generate a basic document structure based on page numbers"""
+        document_structure = []
+        
+        # Create a main heading
+        main_heading = {
+            "heading": "Document Content",
+            "page_reference": 1,
+            "subheadings": []
+        }
+        
+        # Add page-based subheadings
+        for page_num in range(len(reader.pages)):
+            page_text = reader.pages[page_num].extract_text()
+            # Try to find a meaningful title in the first few lines of the page
+            lines = page_text.split('\n')
+            title = f"Page {page_num + 1}"
+            
+            # Use the first non-empty line as title if it's reasonably short
+            for line in lines[:5]:  # Check first 5 lines
+                line = line.strip()
+                if line and 3 < len(line) < 100:  # Reasonable title length
+                    title = line
+                    break
+            
+            main_heading["subheadings"].append({
+                "title": title,
+                "context": page_text[:2000] if page_text else "",  # Limit context to 2000 chars
+                "page_reference": page_num + 1,
+                "visual_references": []
+            })
+        
+        document_structure.append(main_heading)
+        return {"document_structure": document_structure}
+    
+    def _extract_document_structure_with_enhanced_claude(self, reader: PdfReader, doc: fitz.Document) -> Dict[str, Any]:
+        """
+        Extract document structure using an enhanced Claude API approach for better structure extraction.
+        
+        Args:
+            reader: PyPDF2 PdfReader object
+            doc: PyMuPDF document object
+            
+        Returns:
+            Document structure dictionary generated by Claude with enhanced prompting
+        """
+        # Structure to store document hierarchy
+        structure = {
+            "headings": [],
+            "hierarchy": {},
+            "page_mapping": {},
+            "page_images": {},
+            "metadata": {}  # Metadata dictionary
+        }
+        
+        # Extract document title and metadata (same as original method)
+        try:
+            # Get the filename from the document path
+            if hasattr(doc, 'name') and doc.name:
+                file_path = doc.name
+                file_name = os.path.basename(file_path)
+                # Remove extension
+                file_name_without_ext = os.path.splitext(file_name)[0]
+                structure["title"] = file_name_without_ext
+                structure["metadata"]["title"] = structure["title"]
+                print(f"Using filename as title: {structure['title']}")
+            else:
+                # Fallback to extracting from PDF metadata or content
+                if doc.metadata and doc.metadata.get('title'):
+                    structure["title"] = doc.metadata.get('title')
+                    structure["metadata"]["title"] = structure["title"]
+                else:
+                    # Try to extract title from first page
+                    first_page_text = reader.pages[0].extract_text()
+                    first_lines = first_page_text.split('\n')
+                    if first_lines and len(first_lines[0]) < 100:  # Reasonable title length
+                        structure["title"] = first_lines[0].strip()
+                        structure["metadata"]["title"] = structure["title"]
+        except Exception as e:
+            print(f"Error extracting document title from filename: {str(e)}")
+            # Fallback to a default title
+            structure["title"] = f"Document {uuid.uuid4().hex[:8]}"
+            structure["metadata"]["title"] = structure["title"]
+        
+        # Extract metadata (same as original method)
+        try:
+            structure["metadata"]["file_size"] = os.path.getsize(doc.name)
+            structure["metadata"]["file_size_kb"] = round(structure["metadata"]["file_size"] / 1024, 2)
+        except Exception as e:
+            print(f"Error extracting file size: {str(e)}")
+            structure["metadata"]["file_size"] = 0
+            structure["metadata"]["file_size_kb"] = 0
+        
+        # Extract additional PDF metadata (same as original method)
+        try:
+            if doc.metadata:
+                structure["metadata"]["author"] = doc.metadata.get('author', 'Unknown')
+                structure["metadata"]["keywords"] = doc.metadata.get('keywords', '')
+                structure["metadata"]["subject"] = doc.metadata.get('subject', '')
+                structure["metadata"]["producer"] = doc.metadata.get('producer', '')
+                structure["metadata"]["creator"] = doc.metadata.get('creator', '')
+                
+                # Creation date
+                creation_date = doc.metadata.get('creationDate', None)
+                if creation_date:
+                    # Try to parse PDF date format (D:YYYYMMDDHHmmSS)
+                    if isinstance(creation_date, str) and creation_date.startswith('D:'):
+                        date_str = creation_date[2:16]  # Extract YYYYMMDDHHMMSS
+                        try:
+                            from datetime import datetime
+                            parsed_date = datetime.strptime(date_str, '%Y%m%d%H%M%S')
+                            structure["metadata"]["creation_date"] = parsed_date.isoformat()
+                        except:
+                            structure["metadata"]["creation_date"] = creation_date
+                    else:
+                        structure["metadata"]["creation_date"] = creation_date
+        except Exception as e:
+            print(f"Error extracting document metadata: {str(e)}")
+        
+        # Store page count
+        structure["metadata"]["page_count"] = len(reader.pages)
+        
+        # Extract full text and render page images (same as original method)
+        full_text = ""
+        for page_num in range(len(reader.pages)):
+            page = reader.pages[page_num]
+            page_text = page.extract_text()
+            full_text += f"\n\n--- Page {page_num + 1} ---\n\n{page_text}"
+            
+            # Render the page as an image for later use
+            pix = doc.load_page(page_num).get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Resize image if too large
+            max_width = 1200
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.LANCZOS)
+            
+            # Convert to base64 for storage
+            buffered = io.BytesIO()
+            img.save(buffered, format="JPEG", quality=85)
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            
+            # Store the page image
+            structure["page_images"][page_num] = img_str
+        
+        # Define the enhanced prompt for Claude to analyze document structure
+        enhanced_prompt = f"""
+You are an expert document structure analyzer. Your task is to extract the hierarchical structure of a PDF document with extremely high precision and accuracy.
+
+# INPUT
+I will provide you with the full text content of a PDF document, with page markers that indicate page boundaries.
+
+# TASK
+Extract the following elements from the document:
+
+1. HEADINGS AND SUBHEADINGS:
+   - Identify all heading levels (main headings, subheadings, sub-subheadings, etc.)
+   - Determine the hierarchical relationships between headings
+   - Detect numbered and unnumbered headings (e.g., "1. Introduction", "Methodology", "2.3 Results")
+   - Consider typography hints in the text (ALL CAPS, indentation patterns, numbering schemes)
+   - For academic papers, identify sections like Abstract, Introduction, Methodology, Results, Discussion, Conclusion
+   - For technical documents, identify Executive Summary, Overview, Requirements, Specifications, etc.
+
+2. CONTEXT:
+   - Extract the full text content under each heading/subheading
+   - Include the text exactly as it appears, without summarizing or modifying
+
+3. PAGE REFERENCES:
+   - Record the exact page number where each section begins
+   - Page numbers should be 1-indexed (starting from 1)
+
+4. VISUAL ELEMENTS:
+   - Identify ALL figures, tables, charts, diagrams, and other visual elements
+   - Capture the exact caption text for each visual element (e.g., "Figure 1: Annual Revenue Growth")
+   - Record the page number where each visual element appears
+   - Note any references to visual elements in the text
+
+# RULES
+- ACCURACY: Your primary goal is 100% accurate extraction of the document structure
+- COMPLETENESS: Include all headings, subheadings, and relevant visual elements
+- PRESERVATION: Maintain the exact text as it appears in the document
+- HIERARCHY: Correctly represent the hierarchical relationships between headings
+- EXCLUSIVITY: Do not add, generate, or summarize any content
+- PRECISION: Ensure page numbers are accurately assigned to each element
+
+# OUTPUT FORMAT
+Return the document structure as valid, well-formed JSON in the following format:
+
+{{
+  "document_structure": [
+    {{
+      "heading": "Main Heading 1",
+      "page_reference": 1,
+      "subheadings": [
+        {{
+          "title": "Subheading 1.1",
+          "context": "The exact text content under this subheading...",
+          "page_reference": 1,
+          "visual_references": [
+            {{
+              "image_caption": "Figure 1: Description of figure as it appears in the text",
+              "image_reference": "figure_001",
+              "page_reference": 1
+            }}
+          ]
+        }},
+        {{
+          "title": "Subheading 1.2",
+          "context": "The exact text content under this subheading...",
+          "page_reference": 2,
+          "visual_references": []
+        }}
+      ]
+    }},
+    {{
+      "heading": "Main Heading 2",
+      "page_reference": 3,
+      "subheadings": [...]
+    }}
+  ]
+}}
+
+# DOCUMENT TEXT
+Here is the document text to analyze:
+
+{full_text}
+
+Respond ONLY with the JSON output. Do not include any explanations or additional text. Ensure your JSON is properly formatted and valid.
+"""
+        
+        # Call Claude API to process the document structure
+        print(f"Sending document to Claude 3.5 Sonnet for enhanced structure analysis (text length: {len(full_text)} characters)")
+        try:
+            # Set a larger max_tokens to ensure we get complete output
+            response = self.claude_client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=8192,  # Maximum allowed for Claude 3.5 Sonnet
+                temperature=0,
+                system="You are an expert document structure analyzer specializing in extracting hierarchical document structure with perfect accuracy. You excel at identifying headings, subheadings, body content, and visual elements like figures, tables, and charts. You always return valid, parseable JSON and never add, modify or summarize the original content.",
+                messages=[
+                    {"role": "user", "content": enhanced_prompt}
+                ]
+            )
+            
+            # Extract the response content
+            claude_response = response.content[0].text
+            
+            # Properly extract and fix JSON from the response
+            json_str = self._extract_and_fix_json(claude_response)
+            
+            # Parse the JSON response
+            try:
+                claude_structure = json.loads(json_str)
+                print(f"Claude 3.5 Sonnet successfully extracted enhanced document structure with {len(claude_structure['document_structure'])} main headings")
+                
+                # Now map the Claude structure to our expected format
+                for heading_entry in claude_structure["document_structure"]:
+                    heading_text = heading_entry["heading"]
+                    page_reference = heading_entry["page_reference"] - 1  # Convert to 0-indexed
+                    
+                    # Add to our structure
+                    structure["headings"].append(heading_text)
+                    structure["hierarchy"][heading_text] = []
+                    structure["page_mapping"][heading_text] = page_reference
+                    
+                    # Process subheadings
+                    if "subheadings" in heading_entry:
+                        for subheading_entry in heading_entry["subheadings"]:
+                            subheading_text = subheading_entry["title"]
+                            subheading_page = subheading_entry["page_reference"] - 1  # Convert to 0-indexed
+                            
+                            # Add to our hierarchy
+                            structure["hierarchy"][heading_text].append(subheading_text)
+                            structure["page_mapping"][subheading_text] = subheading_page
+                
+                # If Claude didn't find any headings, create a simple structure with the document title
+                if not structure["headings"]:
+                    print("WARNING: Claude didn't detect any headings. Creating simple title-based structure.")
+                    self._create_simple_structure(structure, reader)
+                
+                # Store the original Claude structure for later use in extracting structured content
+                structure["claude_structure"] = claude_structure
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Error parsing Claude response as JSON or missing key: {str(e)}")
+                print(f"JSON string sample: {json_str[:200]}...")
+                
+                # Create a basic document structure using the title and page structure
+                print("Creating fallback document structure from PDF content")
+                self._create_simple_structure(structure, reader)
+                
+                # Try to salvage any partial structure from Claude's response
+                try:
+                    fallback_structure = self._create_default_structure_with_partial_content(json_str)
+                    fallback_json = json.loads(fallback_structure)
+                    if fallback_json["document_structure"] and len(fallback_json["document_structure"]) > 1:
+                        print(f"Successfully salvaged partial structure with {len(fallback_json['document_structure'])} headings")
+                        structure["claude_structure"] = fallback_json
+                    else:
+                        structure["claude_structure"] = self._generate_page_based_structure(reader)
+                except Exception as fallback_error:
+                    print(f"Error creating fallback structure: {str(fallback_error)}")
+                    structure["claude_structure"] = self._generate_page_based_structure(reader)
+        
+        except Exception as e:
+            print(f"Error calling Claude API for enhanced document structure: {str(e)}")
+            # Fallback to creating a basic document structure
+            title = structure["title"]
+            structure["headings"].append(title)
+            structure["hierarchy"][title] = []
+            structure["page_mapping"][title] = 0
+            
+            # Create a basic Claude structure for return
+            structure["claude_structure"] = {
+                "document_structure": [
+                    {
+                        "heading": title,
+                        "page_reference": 1,
+                        "subheadings": []
+                    }
+                ]
+            }
+            
+            # For each page, add a "Page X" entry
             for page_num in range(len(reader.pages)):
                 page_text = reader.pages[page_num].extract_text()
                 structure["claude_structure"]["document_structure"][0]["subheadings"].append({
@@ -447,8 +817,8 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 # Find starting and ending braces
                 start_idx = text.find('{')
                 if start_idx == -1:
-                    # No JSON found, create a minimal structure
-                    return '{"document_structure": []}'
+                    print("No JSON structure found, creating minimal structure")
+                    return self._create_default_structure()
                 
                 # Count braces to find matching end
                 brace_count = 0
@@ -490,57 +860,340 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                     if end_idx > 0:
                         json_str = json_str[:end_idx]
                     else:
-                        # No closing brace found, create minimal structure
-                        return '{"document_structure": []}'
+                        print("No closing brace found, creating default structure")
+                        return self._create_default_structure()
             except Exception as e:
                 print(f"Error during JSON extraction: {str(e)}")
-                # Return minimal valid JSON
-                return '{"document_structure": []}'
+                return self._create_default_structure()
         
-        # REPAIR JSON
+        # Try parsing as is first
         try:
-            # Try parsing as is
-            json.loads(json_str)
+            parsed = json.loads(json_str)
+            print("JSON parsed successfully without repairs")
             return json_str
         except json.JSONDecodeError as e:
             print(f"JSON needs repair: {str(e)}")
             
+            # Store original for comparison
+            original_json_str = json_str
+            
+            # Apply fixes in sequence, checking after each fix
+            
             # 1. Fix line breaks in strings (common Claude error)
-            # This regex pattern matches unescaped line breaks within JSON strings
-            pattern = r'("(?:\\.|[^"\\])*?)\n((?:\\.|[^"\\])*?")'
-            json_str = re.sub(pattern, r'\1\\n\2', json_str)
+            json_str = re.sub(r'("(?:\\.|[^"\\])*?)\n((?:\\.|[^"\\])*?")', r'\1\\n\2', json_str)
+            if self._check_json(json_str):
+                print("Fixed JSON by replacing newlines in strings")
+                return json_str
             
             # 2. Fix missing commas between objects in arrays
             json_str = re.sub(r'}\s*{', '},{', json_str)
+            if self._check_json(json_str):
+                print("Fixed JSON by adding missing commas between objects")
+                return json_str
             
             # 3. Fix trailing commas in arrays and objects
             json_str = re.sub(r',\s*}', '}', json_str)
             json_str = re.sub(r',\s*]', ']', json_str)
+            if self._check_json(json_str):
+                print("Fixed JSON by removing trailing commas")
+                return json_str
+                
+            # 4. Fix issues with quotes and escaping
+            # Replace curly quotes with straight quotes
+            json_str = json_str.replace('"', '"').replace('"', '"')
+            # Ensure quotes around keys
+            json_str = re.sub(r'([{,]\s*)([a-zA-Z0-9_]+)(\s*:)', r'\1"\2"\3', json_str)
+            if self._check_json(json_str):
+                print("Fixed JSON by correcting quotes")
+                return json_str
             
-            # 4. Try to truncate at the end of valid JSON
-            # If we still have issues, try to find a valid truncation point
+            # 5. Try using a lenient JSON parser (json5)
+            try:
+                import json5
+                parsed = json5.loads(json_str)
+                print("Successfully parsed with json5")
+                return json.dumps(parsed)  # Convert back to standard JSON
+            except:
+                print("json5 parsing failed or module not available")
+            
+            # 6. Try intelligent truncation based on error position
             try:
                 json.loads(json_str)
             except json.JSONDecodeError as e2:
-                print(f"Attempting to truncate JSON at position {e2.pos}")
+                print(f"Attempting intelligent truncation at position {e2.pos}")
                 if e2.pos > 0:
-                    # Try truncating at the error position and adding needed closure
+                    # Try advanced truncation and repair
                     truncated = json_str[:e2.pos]
-                    # Count unclosed braces and brackets
+                    
+                    # Check what's missing
                     open_braces = truncated.count('{') - truncated.count('}')
                     open_brackets = truncated.count('[') - truncated.count(']')
-                    # Close them
-                    closure = '}' * open_braces + ']' * open_brackets
-                    if open_braces > 0 or open_brackets > 0:
-                        json_str = truncated + closure
+                    open_quotes = truncated.count('"') % 2  # Odd count means unclosed quote
+                    
+                    # Case 1: Missing closing quote
+                    if open_quotes == 1:
+                        truncated += '"'
+                        print("Added missing closing quote")
+                    
+                    # Case 2: Missing commas or structural issues
+                    # If we're after a closing brace/bracket but before opening a new one
+                    if e2.msg.startswith('Expecting'):
+                        # Check the content around the error
+                        error_context = json_str[max(0, e2.pos-10):min(len(json_str), e2.pos+10)]
+                        print(f"Error context: {error_context}")
+                        
+                        # Fix common structural issues based on error message
+                        if e2.msg.startswith('Expecting \',\''):
+                            # Try adding a comma at the error position
+                            fixed = json_str[:e2.pos] + ',' + json_str[e2.pos:]
+                            if self._check_json(fixed):
+                                print("Fixed by adding missing comma")
+                                return fixed
+                        
+                        if e2.msg.startswith('Expecting property name'):
+                            # Try closing the object
+                            fixed = json_str[:e2.pos] + '}' + json_str[e2.pos:]
+                            if self._check_json(fixed):
+                                print("Fixed by closing object")
+                                return fixed
+                            
+                    # Case 3: Final closure fixing
+                    # Add missing closing braces/brackets
+                    closure = '"' * open_quotes + '}' * open_braces + ']' * open_brackets
+                    if closure:
+                        fixed = truncated + closure
+                        if self._check_json(fixed):
+                            print(f"Fixed JSON with intelligent closure: {closure}")
+                            return fixed
+                        
+                        # Try more aggressive truncation + closure
+                        # Find the last complete object/array
+                        last_good_object = self._find_last_complete_object(truncated)
+                        if last_good_object and self._check_json(last_good_object):
+                            print("Fixed by extracting last complete valid object")
+                            return last_good_object
+                        
+            # If we got here, all our repair attempts failed
+            print("Could not repair JSON after multiple attempts, creating default structure")
+            
+            # Create default structure with partial extraction if possible
+            return self._create_default_structure_with_partial_content(original_json_str)
+    
+    def _check_json(self, json_str):
+        """Check if a JSON string is valid by attempting to parse it"""
+        try:
+            json.loads(json_str)
+            return True
+        except:
+            return False
+    
+    def _find_last_complete_object(self, json_str):
+        """Find the last complete JSON object in a string"""
+        # Try to find the last valid object by progressively removing characters
+        for i in range(len(json_str), 0, -1):
+            subset = json_str[:i]
+            # Count braces to ensure we have a complete object
+            if subset.count('{') == subset.count('}') and subset.count('[') == subset.count(']'):
+                try:
+                    # See if it's valid JSON
+                    json.loads(subset)
+                    return subset
+                except:
+                    pass
+        return None
+    
+    def _create_default_structure(self):
+        """Create a minimal valid document structure JSON"""
+        return json.dumps({
+            "document_structure": [
+                {
+                    "heading": "Document Content",
+                    "page_reference": 1,
+                    "subheadings": []
+                }
+            ]
+        })
+    
+    def _create_default_structure_with_partial_content(self, original_json_str):
+        """Create a default structure but try to extract any valid subcomponents"""
+        # Default structure to start with
+        default_structure = {
+            "document_structure": [
+                {
+                    "heading": "Document Content",
+                    "page_reference": 1,
+                    "subheadings": []
+                }
+            ]
+        }
+        
+        # Try to extract any valid subheadings or content
+        try:
+            # First try to extract partial document_structure array
+            structure_match = re.search(r'"document_structure"\s*:\s*\[(.*?)\]', original_json_str, re.DOTALL)
+            if structure_match:
+                structure_content = structure_match.group(1)
                 
-            # 5. Final attempt: if all else fails, return a minimal valid structure
+                # Try to extract each object in the array
+                heading_objects = []
+                object_pattern = r'{(.*?)}'
+                object_matches = re.finditer(object_pattern, structure_content, re.DOTALL)
+                
+                for match in object_matches:
+                    heading_obj = match.group(0)
+                    try:
+                        # Try to fix and parse each object individually
+                        fixed_obj = self._fix_heading_object(heading_obj)
+                        if fixed_obj:
+                            heading_objects.append(fixed_obj)
+                    except:
+                        pass
+                
+                if heading_objects:
+                    default_structure["document_structure"] = heading_objects
+                    print(f"Extracted {len(heading_objects)} partial heading objects")
+                    return json.dumps(default_structure)
+            
+            # If that didn't work, try extracting individual properties
+            heading_matches = re.findall(r'"heading"\s*:\s*"([^"]+)"', original_json_str)
+            page_matches = re.findall(r'"page_reference"\s*:\s*(\d+)', original_json_str)
+            
+            # Extract subheadings pattern
+            subheading_sections = re.findall(r'"subheadings"\s*:\s*\[(.*?)\]', original_json_str, re.DOTALL)
+            subheadings_by_section = []
+            
+            # Process each subheadings section
+            for section in subheading_sections:
+                subheadings = []
+                # Extract individual subheading objects
+                subheading_objects = re.finditer(r'{(.*?)}', section, re.DOTALL)
+                for match in subheading_objects:
+                    subheading_obj = match.group(0)
+                    # Extract title and page reference
+                    title_match = re.search(r'"title"\s*:\s*"([^"]+)"', subheading_obj)
+                    page_match = re.search(r'"page_reference"\s*:\s*(\d+)', subheading_obj)
+                    
+                    if title_match:
+                        subheading = {
+                            "title": title_match.group(1),
+                            "page_reference": int(page_match.group(1)) if page_match else 1,
+                            "visual_references": []
+                        }
+                        
+                        # Try to extract context if available
+                        context_match = re.search(r'"context"\s*:\s*"(.*?)"', subheading_obj, re.DOTALL)
+                        if context_match:
+                            # Fix escaping in the context
+                            context = context_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                            subheading["context"] = context
+                            
+                        subheadings.append(subheading)
+                
+                subheadings_by_section.append(subheadings)
+            
+            # If we found headings, use them
+            if heading_matches:
+                default_structure["document_structure"] = []
+                
+                for i in range(len(heading_matches)):
+                    heading_entry = {
+                        "heading": heading_matches[i],
+                        "page_reference": int(page_matches[i]) if i < len(page_matches) else 1,
+                        "subheadings": subheadings_by_section[i] if i < len(subheadings_by_section) else []
+                    }
+                    default_structure["document_structure"].append(heading_entry)
+                    
+                print(f"Extracted {len(heading_matches)} partial headings with {sum(len(s) for s in subheadings_by_section)} subheadings")
+            
+        except Exception as e:
+            print(f"Error creating partial structure: {str(e)}")
+            # If all parsing attempts failed, extract basic titles from document
             try:
-                json.loads(json_str)
-                return json_str
+                # Just try to find main section titles in the text
+                title_pattern = r'"title"\s*:\s*"([^"]+)"'
+                titles = re.findall(title_pattern, original_json_str)
+                
+                if titles and len(titles) > 0:
+                    default_structure["document_structure"] = []
+                    for i, title in enumerate(titles):
+                        if len(title) > 3:  # Skip very short titles that might be parsing artifacts
+                            default_structure["document_structure"].append({
+                                "heading": f"Section: {title}",
+                                "page_reference": i + 1,
+                                "subheadings": []
+                            })
+                    print(f"Extracted {len(default_structure['document_structure'])} section titles as fallback")
             except:
-                print("Could not repair JSON, returning minimal structure")
-                return '{"document_structure": []}'
+                pass
+            
+        return json.dumps(default_structure)
+    
+    def _fix_heading_object(self, heading_obj):
+        """Try to fix and parse an individual heading object"""
+        try:
+            # Make sure it's a complete object with balanced braces
+            if heading_obj.count('{') != heading_obj.count('}'):
+                # Add missing closing brace if needed
+                if heading_obj.count('{') > heading_obj.count('}'):
+                    heading_obj += '}'
+                else:
+                    heading_obj = '{' + heading_obj
+            
+            # Fix common issues
+            # Ensure commas between properties
+            heading_obj = re.sub(r'"\s*}\s*"', '", "', heading_obj)
+            # Fix quoted values
+            heading_obj = re.sub(r'(\w+):', r'"\1":', heading_obj)
+            
+            # Try various parsing approaches
+            try:
+                # Standard parsing
+                return json.loads(heading_obj)
+            except:
+                try:
+                    # Try using json5 if available
+                    import json5
+                    return json5.loads(heading_obj)
+                except:
+                    # Extract individual properties through regex as last resort
+                    heading = {}
+                    
+                    # Extract main properties
+                    heading_match = re.search(r'"heading"\s*:\s*"([^"]+)"', heading_obj)
+                    page_match = re.search(r'"page_reference"\s*:\s*(\d+)', heading_obj)
+                    
+                    if heading_match:
+                        heading["heading"] = heading_match.group(1)
+                        heading["page_reference"] = int(page_match.group(1)) if page_match else 1
+                        heading["subheadings"] = []
+                        
+                        # Try to extract subheadings if present
+                        subheadings_match = re.search(r'"subheadings"\s*:\s*\[(.*?)\]', heading_obj, re.DOTALL)
+                        if subheadings_match:
+                            # Process subheadings
+                            subheadings_content = subheadings_match.group(1)
+                            subheading_objects = re.finditer(r'{(.*?)}', subheadings_content, re.DOTALL)
+                            
+                            for match in subheading_objects:
+                                try:
+                                    subheading_obj = match.group(0)
+                                    title_match = re.search(r'"title"\s*:\s*"([^"]+)"', subheading_obj)
+                                    page_match = re.search(r'"page_reference"\s*:\s*(\d+)', subheading_obj)
+                                    
+                                    if title_match:
+                                        subheading = {
+                                            "title": title_match.group(1),
+                                            "page_reference": int(page_match.group(1)) if page_match else 1,
+                                            "visual_references": []
+                                        }
+                                        heading["subheadings"].append(subheading)
+                                except:
+                                    pass
+                        
+                        return heading
+                    return None
+        except:
+            return None
     
     def _contains_visual_reference(self, text: str) -> bool:
         """Check if text contains reference to a figure, table, or other visual element"""
@@ -662,531 +1315,252 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
     
     def get_document_structure(self, document_id: str) -> Dict[str, Any]:
         """
-        Get the structure of a processed document.
+        Get the structure of a document.
         
         Args:
-            document_id: ID of the document
+            document_id: Document ID
             
         Returns:
-            Document structure dictionary
-        """
-        with self.driver.session() as session:
-            # Get all headings, subheadings, and page images
-            result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})-[:HAS_HEADING]->(h:Heading {type: 'main'})
-                OPTIONAL MATCH (h)-[:HAS_SUBHEADING]->(s:Heading)
-                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
-                RETURN h.text as heading, 
-                       collect(s.text) as subheadings,
-                       collect({number: p.number, image: p.image}) as pages
-                ORDER BY h.text
-                """,
-                doc_id=document_id
-            )
-            
-            structure = {
-                "headings": [],
-                "hierarchy": {},
-                "page_images": {}
-            }
-            
-            for record in result:
-                heading = record["heading"]
-                subheadings = record["subheadings"]
-                pages = record["pages"]
-                
-                structure["headings"].append(heading)
-                structure["hierarchy"][heading] = [s for s in subheadings if s is not None]
-                
-                # Add page images to the structure
-                for page in pages:
-                    if page["number"] is not None and page["image"] is not None:
-                        structure["page_images"][page["number"]] = page["image"]
-            
-            return structure
-    
-    def get_page_image(self, document_id: str, page_number: int) -> Dict[str, Any]:
-        """
-        Get a specific page image from a document.
-        
-        Args:
-            document_id: ID of the document
-            page_number: Page number (0-indexed)
-            
-        Returns:
-            Dictionary with page image data
+            Document structure
         """
         with self.driver.session() as session:
             # Check if document exists
-            doc_result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})
-                RETURN d
-                """,
-                doc_id=document_id
-            ).single()
+            result = session.run(
+                "MATCH (d:Document {id: $id}) RETURN d",
+                id=document_id
+            )
             
-            if not doc_result:
+            document = result.single()
+            if not document:
                 raise ValueError(f"Document with ID {document_id} not found")
             
-            # Get page image from the PageImage node
-            page_image_result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})-[:HAS_PAGE]->(p:Page {number: $page_num})
-                MATCH (p)-[:HAS_IMAGE]->(pi:PageImage)
-                RETURN pi.base64 AS image
-                """,
-                doc_id=document_id,
-                page_num=page_number
-            ).single()
-            
-            if not page_image_result:
-                # Try alternative query without PageImage node
-                # This handles cases where the image is stored directly on the Page node
-                page_result = session.run(
-                    """
-                    MATCH (d:Document {id: $doc_id})-[:HAS_PAGE]->(p:Page {number: $page_num})
-                    RETURN p.image AS image
-                    """,
-                    doc_id=document_id,
-                    page_num=page_number
-                ).single()
-                
-                if not page_result:
-                    # Last resort: try to get from document structure
-                    structure = self.get_document_structure(document_id)
-                    if "page_images" in structure and page_number in structure["page_images"]:
-                        return {
-                            "image": structure["page_images"][page_number],
-                            "page_number": page_number,
-                            "document_id": document_id
-                        }
-                    else:
-                        raise ValueError(f"Page {page_number} not found for document {document_id}")
-                
-                return {
-                    "image": page_result["image"],
-                    "page_number": page_number,
-                    "document_id": document_id
-                }
-            
-            return {
-                "image": page_image_result["image"],
-                "page_number": page_number,
-                "document_id": document_id
-            }
-    
-    def get_all_documents(self) -> List[str]:
-        """
-        Get a list of all document IDs in the database.
-        
-        Returns:
-            List of document IDs
-        """
-        with self.driver.session() as session:
+            # Get document data
             result = session.run(
                 """
-                MATCH (d:Document)
-                RETURN d.id as document_id
-                """
-            )
-            
-            return [record["document_id"] for record in result]
-    
-    def get_all_documents_with_metadata(self) -> List[Dict[str, Any]]:
-        """
-        Get a list of all documents with metadata.
-        
-        Returns:
-            List of document dictionaries with id and metadata
-        """
-        with self.driver.session() as session:
-            result = session.run(
-                """
-                MATCH (d:Document)
+                MATCH (d:Document {id: $id})
                 OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
-                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
-                WITH d, 
-                     count(DISTINCT h) as heading_count,
-                     count(DISTINCT p) as actual_page_count
-                RETURN d.id as document_id, 
-                       d.title as title,
-                       d.upload_date as upload_date,
-                       d.page_count as page_count,
-                       d.file_size_kb as file_size_kb,
-                       d.author as author,
-                       d.creation_date as creation_date,
-                       d.keywords as keywords,
-                       d.subject as subject,
-                       heading_count,
-                       actual_page_count
-                """
-            )
-            
-            return [dict(record) for record in result]
-    
-    def clear_document(self, document_id: str) -> bool:
-        """
-        Delete a document and all its related nodes from Neo4j.
-        
-        Args:
-            document_id: ID of the document to delete
-            
-        Returns:
-            True if document was deleted, False if not found
-        """
-        with self.driver.session() as session:
-            # Check if document exists
-            result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})
-                RETURN count(d) as doc_count
+                OPTIONAL MATCH (h)-[:HAS_SUBHEADING]->(s:Subheading)
+                RETURN d, collect(DISTINCT h) as headings, collect(DISTINCT s) as subheadings
                 """,
-                doc_id=document_id
-            )
-            
-            if result.single()["doc_count"] == 0:
-                return False
-                
-            # First count all nodes to be deleted for verification
-            count_result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})
-                OPTIONAL MATCH (d)-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
-                RETURN count(DISTINCT n) as related_node_count
-                """,
-                doc_id=document_id
-            )
-            related_node_count = count_result.single()["related_node_count"]
-            
-            # Delete all related nodes first
-            session.run(
-                """
-                MATCH (d:Document {id: $doc_id})-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
-                DETACH DELETE n
-                """,
-                doc_id=document_id
-            )
-            
-            # Then delete the document node
-            delete_result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})
-                DETACH DELETE d
-                RETURN count(d) as deleted_count
-                """,
-                doc_id=document_id
-            )
-            
-            deleted_count = delete_result.single()["deleted_count"]
-            print(f"Deleted document {document_id} with {related_node_count} related nodes")
-            
-            # Verify no orphaned nodes remain by checking for any nodes that were connected to this document
-            verify_result = session.run(
-                """
-                MATCH (n)
-                WHERE EXISTS {
-                    MATCH (n)-[r]-()
-                    WHERE type(r) IN ['HAS_PAGE', 'HAS_HEADING', 'HAS_SUBHEADING', 'APPEARS_ON', 'CONTAINS']
-                      AND NOT EXISTS {
-                        MATCH (d:Document)-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
-                      }
-                }
-                RETURN count(n) as orphan_count
-                """
-            )
-            
-            orphan_count = verify_result.single()["orphan_count"]
-            if orphan_count > 0:
-                print(f"Warning: Found {orphan_count} orphaned nodes after deletion")
-                # Perform cleanup of orphaned nodes if found
-                session.run(
-                    """
-                    MATCH (n)
-                    WHERE EXISTS {
-                        MATCH (n)-[r]-()
-                        WHERE type(r) IN ['HAS_PAGE', 'HAS_HEADING', 'HAS_SUBHEADING', 'APPEARS_ON', 'CONTAINS']
-                          AND NOT EXISTS {
-                            MATCH (d:Document)-[:CONTAINS|HAS_PAGE|HAS_HEADING]->(n)
-                          }
-                    }
-                    DETACH DELETE n
-                    """
-                )
-            
-            return True
-    
-    def get_document_metadata(self, document_id: str) -> Dict[str, Any]:
-        """
-        Get metadata for a specific document.
-        
-        Args:
-            document_id: ID of the document
-            
-        Returns:
-            Dictionary containing document metadata
-        """
-        with self.driver.session() as session:
-            result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})
-                OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
-                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
-                RETURN d.id as document_id,
-                       d.title as title,
-                       d.upload_date as upload_date,
-                       d.page_count as page_count,
-                       d.file_size_kb as file_size_kb,
-                       d.author as author,
-                       d.creation_date as creation_date,
-                       d.keywords as keywords,
-                       d.subject as subject,
-                       d.producer as producer,
-                       d.creator as creator,
-                       count(DISTINCT h) as heading_count,
-                       count(DISTINCT p) as actual_page_count
-                """,
-                doc_id=document_id
+                id=document_id
             )
             
             record = result.single()
             if not record:
-                raise KeyError(f"Document {document_id} not found")
+                return {"error": "Document found but no structure available"}
             
-            return dict(record)
-    
-    def clean_orphaned_nodes(self) -> int:
-        """
-        Clean up any orphaned nodes in the database.
-        These are nodes that have no connection to any Document node.
-        
-        Returns:
-            The number of orphaned nodes deleted
-        """
-        with self.driver.session() as session:
-            # First, count orphaned nodes
-            count_result = session.run(
-                """
-                MATCH (n) 
-                WHERE (n:Page OR n:Heading) 
-                AND NOT EXISTS {
-                    MATCH (n)<-[:CONTAINS]-(d:Document)
+            document_node = record["d"]
+            heading_nodes = record["headings"]
+            
+            # Get page count
+            page_count = self._get_document_page_count(document_id)
+            
+            # Build structure
+            structure = {
+                "id": document_id,
+                "title": document_node.get("title", "Untitled Document"),
+                "headings": [],
+                "hierarchy": {},
+                "page_mapping": {},
+                "metadata": {
+                    "title": document_node.get("title", "Untitled Document"),
+                    "page_count": page_count
                 }
-                RETURN count(n) as orphan_count
-                """
-            )
+            }
             
-            orphan_count = count_result.single()["orphan_count"]
+            # Add metadata if available
+            for key in ["author", "keywords", "subject", "producer", "creator", "creation_date", "file_size", "file_size_kb"]:
+                if key in document_node:
+                    structure["metadata"][key] = document_node[key]
             
-            if orphan_count > 0:
-                print(f"Found {orphan_count} orphaned nodes to clean up")
-                
-                # Delete orphaned nodes
-                session.run(
-                    """
-                    MATCH (n) 
-                    WHERE (n:Page OR n:Heading) 
-                    AND NOT EXISTS {
-                        MATCH (n)<-[:CONTAINS]-(d:Document)
-                    }
-                    DETACH DELETE n
-                    """
-                )
+            # Get headings
+            if heading_nodes:
+                for heading_node in heading_nodes:
+                    heading_text = heading_node.get("text", "")
+                    if not heading_text:
+                        continue
+                        
+                    structure["headings"].append(heading_text)
+                    structure["hierarchy"][heading_text] = []
+                    structure["page_mapping"][heading_text] = heading_node.get("page", 0)
+                    
+                    # Get subheadings for this heading
+                    result = session.run(
+                        """
+                        MATCH (h:Heading {id: $heading_id})-[:HAS_SUBHEADING]->(s:Subheading)
+                        RETURN s ORDER BY s.page, s.id
+                        """,
+                        heading_id=heading_node.get("id", "")
+                    )
+                    
+                    for subheading_record in result:
+                        subheading_node = subheading_record["s"]
+                        subheading_text = subheading_node.get("text", "")
+                        if not subheading_text:
+                            continue
+                            
+                        structure["hierarchy"][heading_text].append(subheading_text)
+                        structure["page_mapping"][subheading_text] = subheading_node.get("page", 0)
             
-            return orphan_count
-    
-    def store_structured_content(self, document_id: str, structured_content: Dict[str, Any]) -> None:
+            return structure
+            
+    def document_exists(self, document_id: str) -> bool:
         """
-        Store structured content in Neo4j.
+        Check if a document exists in the database.
         
         Args:
             document_id: Document ID
-            structured_content: Structured content dictionary
-        """
-        with self.driver.session() as session:
-            # Retrieve the document node
-            document_query = """
-            MATCH (d:Document {id: $doc_id})
-            RETURN d
-            """
-            document_result = session.run(document_query, doc_id=document_id).single()
-            
-            if not document_result:
-                raise ValueError(f"Document with ID {document_id} not found")
-            
-            # Create nodes for each heading
-            for heading_data in structured_content["document_structure"]:
-                heading_id = str(uuid.uuid4())
-                
-                # Create heading node
-                session.run(
-                    """
-                    MATCH (d:Document {id: $doc_id})
-                    CREATE (h:Heading {
-                        id: $heading_id,
-                        text: $heading_text,
-                        type: 'main',
-                        page_reference: $page_reference
-                    })
-                    CREATE (d)-[:HAS_HEADING]->(h)
-                    CREATE (d)-[:CONTAINS]->(h)
-                    WITH d, h
-                    MATCH (p:Page {number: $page_num})
-                    WHERE (d)-[:HAS_PAGE]->(p)
-                    CREATE (h)-[:APPEARS_ON]->(p)
-                    """,
-                    doc_id=document_id,
-                    heading_id=heading_id,
-                    heading_text=heading_data["heading"],
-                    page_reference=heading_data["page_reference"] - 1,  # Convert to 0-indexed
-                    page_num=heading_data["page_reference"] - 1  # Convert to 0-indexed
-                )
-                
-                # Create subheading nodes
-                for subheading_data in heading_data["subheadings"]:
-                    subheading_id = str(uuid.uuid4())
-                    
-                    # Create subheading node
-                    session.run(
-                        """
-                        MATCH (d:Document {id: $doc_id})
-                        MATCH (h:Heading {id: $heading_id})
-                        CREATE (s:Heading {
-                            id: $subheading_id,
-                            text: $subheading_text,
-                            type: 'sub',
-                            page_reference: $page_reference,
-                            context: $context
-                        })
-                        CREATE (d)-[:HAS_HEADING]->(s)
-                        CREATE (h)-[:HAS_SUBHEADING]->(s)
-                        CREATE (h)-[:CONTAINS]->(s)
-                        CREATE (d)-[:CONTAINS]->(s)
-                        WITH d, s
-                        MATCH (p:Page {number: $page_num})
-                        WHERE (d)-[:HAS_PAGE]->(p)
-                        CREATE (s)-[:APPEARS_ON]->(p)
-                        """,
-                        doc_id=document_id,
-                        heading_id=heading_id,
-                        subheading_id=subheading_id,
-                        subheading_text=subheading_data["title"],
-                        page_reference=subheading_data["page_reference"] - 1,  # Convert to 0-indexed
-                        context=subheading_data["context"],
-                        page_num=subheading_data["page_reference"] - 1  # Convert to 0-indexed
-                    )
-                    
-                    # Create visual reference nodes
-                    for visual_ref in subheading_data["visual_references"]:
-                        visual_id = str(uuid.uuid4())
-                        
-                        session.run(
-                            """
-                            MATCH (d:Document {id: $doc_id})
-                            MATCH (s:Heading {id: $subheading_id})
-                            CREATE (v:VisualReference {
-                                id: $visual_id,
-                                caption: $caption,
-                                reference: $reference,
-                                page_reference: $page_reference
-                            })
-                            CREATE (s)-[:HAS_VISUAL]->(v)
-                            CREATE (d)-[:CONTAINS]->(v)
-                            WITH d, v
-                            MATCH (p:Page {number: $page_num})
-                            WHERE (d)-[:HAS_PAGE]->(p)
-                            CREATE (v)-[:APPEARS_ON]->(p)
-                            """,
-                            doc_id=document_id,
-                            subheading_id=subheading_id,
-                            visual_id=visual_id,
-                            caption=visual_ref["image_caption"],
-                            reference=visual_ref["image_reference"],
-                            page_reference=visual_ref["page_reference"] - 1,  # Convert to 0-indexed
-                            page_num=visual_ref["page_reference"] - 1  # Convert to 0-indexed
-                        )
-        
-    def get_structured_content(self, document_id: str) -> Dict[str, Any]:
-        """
-        Get the structured content for a document.
-        
-        Args:
-            document_id: ID of the document
             
         Returns:
-            Structured content dictionary
+            True if document exists, False otherwise
         """
         with self.driver.session() as session:
-            # First, check if the document exists
-            document_query = """
-            MATCH (d:Document {id: $doc_id})
-            RETURN d
-            """
-            document_result = session.run(document_query, doc_id=document_id).single()
-            
-            if not document_result:
-                raise ValueError(f"Document with ID {document_id} not found")
-            
-            # Get all main headings with their subheadings
             result = session.run(
-                """
-                MATCH (d:Document {id: $doc_id})-[:HAS_HEADING]->(h:Heading {type: 'main'})
-                OPTIONAL MATCH (h)-[:HAS_SUBHEADING]->(s:Heading)
-                WITH h, h.page_reference as h_page, s
-                ORDER BY h.text, s.text
-                
-                OPTIONAL MATCH (s)-[:HAS_VISUAL]->(v:VisualReference)
-                WITH h, h_page, s, COLLECT({
-                    image_caption: v.caption,
-                    image_reference: v.reference,
-                    page_reference: CASE WHEN v.page_reference IS NULL THEN null ELSE v.page_reference + 1 END
-                }) as visuals
-                
-                WITH h, h_page, COLLECT({
-                    id: s.id,
-                    title: s.text,
-                    context: s.context,
-                    page_reference: CASE WHEN s.page_reference IS NULL THEN null ELSE s.page_reference + 1 END,
-                    visual_references: [visual IN visuals WHERE visual.image_reference IS NOT NULL]
-                }) as subheadings
-                
-                RETURN h.text as heading,
-                       h_page + 1 as page_reference,
-                       [subheading IN subheadings WHERE subheading.id IS NOT NULL] as subheadings
-                ORDER BY h.text
-                """,
-                doc_id=document_id
+                "MATCH (d:Document {id: $id}) RETURN count(d) as count",
+                id=document_id
             )
             
-            structured_content = {
-                "document_structure": []
-            }
+            record = result.single()
+            return record and record["count"] > 0
+    
+    def get_document_pdf_data(self, document_id: str) -> Optional[bytes]:
+        """
+        Get the original PDF data for a document.
+        
+        Args:
+            document_id: Document ID
             
-            for record in result:
-                heading_entry = {
-                    "heading": record["heading"],
-                    "page_reference": record["page_reference"],
-                    "subheadings": []
-                }
-                
-                for subheading in record["subheadings"]:
-                    # Skip null entries (happens when there are no subheadings)
-                    if subheading["id"] is None:
-                        continue
-                        
-                    subheading_entry = {
-                        "title": subheading["title"],
-                        "context": subheading["context"] or "",
-                        "page_reference": subheading["page_reference"],
-                        "visual_references": subheading["visual_references"]
-                    }
-                    
-                    heading_entry["subheadings"].append(subheading_entry)
-                
-                structured_content["document_structure"].append(heading_entry)
+        Returns:
+            PDF data as bytes if available, None otherwise
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                "MATCH (d:Document {id: $id}) RETURN d.pdf_data as pdf_data",
+                id=document_id
+            )
             
-            return structured_content
+            record = result.single()
+            if not record or not record["pdf_data"]:
+                return None
+                
+            # PDF data is stored as base64 string, convert back to bytes
+            pdf_data_base64 = record["pdf_data"]
+            try:
+                return base64.b64decode(pdf_data_base64)
+            except Exception as e:
+                print(f"Error decoding PDF data: {str(e)}")
+                return None
+
+    def store_structured_content(self, document_id: str, structured_content: Dict[str, Any], is_enhanced: bool = False) -> bool:
+        """
+        Store structured content for a document.
+        
+        Args:
+            document_id: Document ID
+            structured_content: Structured content
+            is_enhanced: Whether this is enhanced structured content
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        with self.driver.session() as session:
+            try:
+                # Convert to JSON string
+                content_json = json.dumps(structured_content)
+                
+                # Store in Neo4j
+                if is_enhanced:
+                    # Store as enhanced structured content
+                    result = session.run(
+                        """
+                        MATCH (d:Document {id: $id})
+                        SET d.enhanced_structured_content = $content,
+                            d.enhanced_content_timestamp = $timestamp
+                        RETURN d
+                        """,
+                        id=document_id,
+                        content=content_json,
+                        timestamp=datetime.now().isoformat()
+                    )
+                else:
+                    # Store as regular structured content
+                    result = session.run(
+                        """
+                        MATCH (d:Document {id: $id})
+                        SET d.structured_content = $content
+                        RETURN d
+                        """,
+                        id=document_id,
+                        content=content_json
+                    )
+                
+                return result.single() is not None
+                
+            except Exception as e:
+                print(f"Error storing structured content: {str(e)}")
+                return False
+    
+    def get_structured_content(self, document_id: str, enhanced: bool = True) -> Dict[str, Any]:
+        """
+        Get structured content for a document.
+        
+        Args:
+            document_id: Document ID
+            enhanced: Whether to get enhanced structured content (default: True)
+                      When set to True, will return enhanced content if available,
+                      falling back to regular content if enhanced is not available.
+                      When set to False, will always return regular content.
+            
+        Returns:
+            Structured content
+        """
+        with self.driver.session() as session:
+            # First check if enhanced content is available if requested
+            if enhanced:
+                result = session.run(
+                    """
+                    MATCH (d:Document {id: $id})
+                    RETURN d.enhanced_structured_content as content,
+                           d.enhanced_content_timestamp as timestamp
+                    """,
+                    id=document_id
+                )
+                
+                record = result.single()
+                if record and record["content"]:
+                    try:
+                        content = json.loads(record["content"])
+                        # Add flags to indicate this is enhanced content
+                        content["enhanced"] = True
+                        if record["timestamp"]:
+                            content["processing_timestamp"] = record["timestamp"]
+                        return content
+                    except json.JSONDecodeError as e:
+                        # If enhanced content is corrupted, fall back to regular
+                        print(f"JSON decode error for document {document_id}: {str(e)}")
+            
+            # Fetch regular content (as fallback or if enhanced not requested)
+            result = session.run(
+                """
+                MATCH (d:Document {id: $id})
+                RETURN d.structured_content as content
+                """,
+                id=document_id
+            )
+            
+            record = result.single()
+            if not record or not record["content"]:
+                raise ValueError(f"No structured content found for document {document_id}")
+                
+            # Parse JSON
+            try:
+                content = json.loads(record["content"])
+                # Add flag to indicate this is regular content
+                content["enhanced"] = False
+                return content
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error for document {document_id}: {str(e)}")
+                raise ValueError(f"Invalid JSON content for document {document_id}")
     
     def get_visual_reference(self, document_id: str, reference: str) -> Dict[str, Any]:
         """
@@ -1223,6 +1597,53 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 "page_number": record["page_number"] + 1,  # Convert to 1-indexed for display
                 "page_image": record["page_image"]
             }
+    
+    def delete_document(self, document_id: str) -> bool:
+        """
+        Delete a document and all related nodes from Neo4j.
+        
+        Args:
+            document_id: Document ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        with self.driver.session() as session:
+            try:
+                # First check if document exists
+                if not self.document_exists(document_id):
+                    raise ValueError(f"Document with ID {document_id} not found")
+                
+                # Delete all relationships and nodes related to the document
+                # This includes: Pages, Headings, and any other connected nodes
+                session.run(
+                    """
+                    MATCH (d:Document {id: $id})
+                    OPTIONAL MATCH (d)-[r1]->(n1)
+                    OPTIONAL MATCH (n1)-[r2]->(n2)
+                    OPTIONAL MATCH (n2)-[r3]->(n3)
+                    DETACH DELETE n3, n2, n1, d
+                    """,
+                    id=document_id
+                )
+                
+                # Verify the document is deleted
+                result = session.run(
+                    "MATCH (d:Document {id: $id}) RETURN count(d) as count",
+                    id=document_id
+                )
+                record = result.single()
+                
+                if record and record["count"] > 0:
+                    print(f"Warning: Document {document_id} was not fully deleted")
+                    return False
+                
+                print(f"Document {document_id} and all related nodes successfully deleted")
+                return True
+                
+            except Exception as e:
+                print(f"Error deleting document {document_id}: {str(e)}")
+                return False
     
     def _extract_images_from_page(self, page: fitz.Page, page_idx: int, document_id: str) -> List[Dict[str, Any]]:
         """
@@ -1263,4 +1684,41 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
             images.append(image_info)
         
         return images
+        
+    def _store_pdf_data(self, document_id: str, pdf_path: str) -> bool:
+        """
+        Store the raw PDF data in the document node for future reprocessing.
+        
+        Args:
+            document_id: Document ID
+            pdf_path: Path to the PDF file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Read the PDF file as binary
+            with open(pdf_path, 'rb') as f:
+                pdf_data = f.read()
+            
+            # Convert to base64 for storage
+            pdf_data_base64 = base64.b64encode(pdf_data).decode()
+            
+            # Store in Neo4j
+            with self.driver.session() as session:
+                result = session.run(
+                    """
+                    MATCH (d:Document {id: $id})
+                    SET d.pdf_data = $pdf_data
+                    RETURN d
+                    """,
+                    id=document_id,
+                    pdf_data=pdf_data_base64
+                )
+                
+                return result.single() is not None
+                
+        except Exception as e:
+            print(f"Error storing PDF data: {str(e)}")
+            return False
         

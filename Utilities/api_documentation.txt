@@ -1,3 +1,20 @@
  Necessary methods for retrieving page images and visual references
-/document/<document_id>/page/<int:page_number> API endpoint to fetch page images
+/document/<document_id>/page/<int:page_number> (/api/structure/document/{id}/page/{page_number}) API endpoint to fetch page images
 /document/<document_id>/visual/<reference> API endpoint to retrieve visual references with their page images
+
+cd "D:\SDGP Project\PythonEnv"; python -c "from flask import Flask; from api import structure_bp; app = Flask(__name__); app.register_blueprint(structure_bp, url_prefix='/api/structure'); print('Structure API Routes:'); [print(f'- {rule}') for rule in app.url_map.iter_rules() if rule.endpoint.startswith('structure')]"
+
+Structure API Routes:
+- /api/structure/upload
+- /api/structure/upload/raw
+- /api/structure/extract/enhanced
+- /api/structure/documents
+- /api/structure/document/<document_id>
+- /api/structure/document/<document_id>/heading
+- /api/structure/document/<document_id>
+- /api/structure/document/<document_id>/structured
+- /api/structure/document/<document_id>/enhanced-available
+- /api/structure/document/<document_id>/enhanced
+- /api/structure/document/<document_id>/page/<int:page_number>
+- /api/structure/document/<document_id>/visual/<reference>
+(PythonEnv) PS D:\SDGP Project\PythonEnv>
