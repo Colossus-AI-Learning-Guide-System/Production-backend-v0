@@ -68,11 +68,8 @@ class Neo4jDocumentProcessor:
                 doc._original_filename = original_filename
                 print(f"Using original filename: {original_filename}")
             
-            # Process document structure using Enhanced Claude method
-            structure = self._extract_document_structure_with_enhanced_claude(reader, doc)
-            
-            # Skip the regular structure extraction to save API costs
-            # regular_structure = self._extract_document_structure_with_claude(reader, doc)
+            # Process document structure using Enhanced Claude with images instead of text
+            structure = self._extract_document_structure_with_enhanced_claude_images(reader, doc)
             
             # Override title with original filename if provided
             if original_filename:
@@ -81,7 +78,7 @@ class Neo4jDocumentProcessor:
                 structure["metadata"]["title"] = structure["title"]
                 print(f"Title set to original filename: {structure['title']}")
             
-            print(f"Extracted {len(structure['headings'])} headings from enhanced structure")
+            print(f"Extracted {len(structure['headings'])} headings from enhanced image-based structure")
             
             # Store PDF data for future reprocessing if needed
             self._store_pdf_data(document_id, pdf_path)
@@ -428,7 +425,7 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
             structure["headings"].append(title)
             structure["hierarchy"][title] = []
             structure["page_mapping"][title] = 0
-            
+                        
             # Create a basic Claude structure for return
             structure["claude_structure"] = {
                 "document_structure": [
@@ -621,6 +618,8 @@ Extract the following elements from the document:
    - Identify all heading levels (main headings, subheadings, sub-subheadings, etc.)
    - Determine the hierarchical relationships between headings
    - Detect numbered and unnumbered headings (e.g., "1. Introduction", "Methodology", "2.3 Results")
+   - If ditected unnumbered headings/subheadings, then use the flow of the document headings and other numbered or unnumbered headings to correctly determine the heading level and asign a number to the heading.
+   - If identified as a Heading/subheading and if the number of charachters of the heading/subheading is less than 120, then skip the heading/subheading and consider it as a normal text.
    - Consider typography hints in the text (ALL CAPS, indentation patterns, numbering schemes)
    - For academic papers, identify sections like Abstract, Introduction, Methodology, Results, Discussion, Conclusion
    - For technical documents, identify Executive Summary, Overview, Requirements, Specifications, etc.
@@ -636,7 +635,6 @@ Extract the following elements from the document:
 4. VISUAL ELEMENTS:
    - Identify ALL figures, tables, charts, diagrams, and other visual elements
    - Capture the exact caption text for each visual element (e.g., "Figure 1: Annual Revenue Growth")
-   - Record the page number where each visual element appears
    - Note any references to visual elements in the text
 
 # RULES
@@ -648,48 +646,31 @@ Extract the following elements from the document:
 - PRECISION: Ensure page numbers are accurately assigned to each element
 
 # OUTPUT FORMAT
-Return the document structure as valid, well-formed JSON in the following format:
+Instead of JSON, provide your response in a structured text format using the following format:
 
-{{
-  "document_structure": [
-    {{
-      "heading": "Main Heading 1",
-      "page_reference": 1,
-      "subheadings": [
-        {{
-          "title": "Subheading 1.1",
-          "context": "The exact text content under this subheading...",
-          "page_reference": 1,
-          "visual_references": [
-            {{
-              "image_caption": "Figure 1: Description of figure as it appears in the text",
-              "image_reference": "figure_001",
-              "page_reference": 1
-            }}
-          ]
-        }},
-        {{
-          "title": "Subheading 1.2",
-          "context": "The exact text content under this subheading...",
-          "page_reference": 2,
-          "visual_references": []
-        }}
-      ]
-    }},
-    {{
-      "heading": "Main Heading 2",
-      "page_reference": 3,
-      "subheadings": [...]
-    }}
-  ]
-}}
+--HEADING-- Main Heading Title (Page: X)
+--CONTENT-- Full text characters of content under this heading...
+
+--SUBHEADING-- Subheading Title (Page: X)
+--CONTENT-- Full text characters of content under this subheading...
+
+--VISUAL-- Figure 1: Caption text (Page: X)
+
+--HEADING-- Another Main Heading (Page: X)
+... and so on
+
+Important rules:
+1. ALWAYS use the exact markers: --HEADING--, --SUBHEADING--, etc.
+2. ALWAYS include the page number in parentheses after each heading, subheading.
+3. Make sure to properly nest subheadings under their respective headings
+4. For academic papers, identify sections like Abstract, Introduction, Methodology, Results, etc.
 
 # DOCUMENT TEXT
 Here is the document text to analyze:
 
 {full_text}
 
-Respond ONLY with the JSON output. Do not include any explanations or additional text. Ensure your JSON is properly formatted and valid.
+Respond ONLY with the structured text output as specified above. Do not include any explanations or additional text.
 """
         
         # Call Claude API to process the document structure
@@ -700,7 +681,7 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 model="claude-3-5-sonnet-20240620",
                 max_tokens=8192,  # Maximum allowed for Claude 3.5 Sonnet
                 temperature=0,
-                system="You are an expert document structure analyzer specializing in extracting hierarchical document structure with perfect accuracy. You excel at identifying headings, subheadings, body content, and visual elements like figures, tables, and charts. You always return valid, parseable JSON and never add, modify or summarize the original content.",
+                system="You are an expert document structure analyzer spcializing in extracting hierarchical document structure with perfect accuracy. You excel at identifying headings, subheadings, body content, and visual elements like figures, tables, and charts. Extract document structure as plaintext with specific markers. Always use the exact markers specified in the prompt. Be thorough and complete, capturing all headings, subheadings and visual elements.",
                 messages=[
                     {"role": "user", "content": enhanced_prompt}
                 ]
@@ -709,63 +690,51 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
             # Extract the response content
             claude_response = response.content[0].text
             
-            # Properly extract and fix JSON from the response
-            json_str = self._extract_and_fix_json(claude_response)
+            # Log response for debugging
+            print(f"Received Claude response with {len(claude_response)} characters")
             
-            # Parse the JSON response
+            # Save the Claude response to a file for debugging
+            self._save_claude_response_to_file(claude_response, structure.get("title", "untitled"))
+            
+            # Parse the structured text response into our JSON format
             try:
-                claude_structure = json.loads(json_str)
-                print(f"Claude 3.5 Sonnet successfully extracted enhanced document structure with {len(claude_structure['document_structure'])} main headings")
+                claude_structure = self._parse_structured_text_to_json(claude_response)
+                print(f"Successfully parsed Claude text response into structured JSON")
+            except Exception as e:
+                print(f"Error parsing Claude text response: {str(e)}")
+                # Create a basic document structure
+                claude_structure = self._generate_page_based_structure(reader)
                 
-                # Now map the Claude structure to our expected format
-                for heading_entry in claude_structure["document_structure"]:
-                    heading_text = heading_entry["heading"]
-                    page_reference = heading_entry["page_reference"] - 1  # Convert to 0-indexed
-                    
-                    # Add to our structure
-                    structure["headings"].append(heading_text)
-                    structure["hierarchy"][heading_text] = []
-                    structure["page_mapping"][heading_text] = page_reference
-                    
-                    # Process subheadings
-                    if "subheadings" in heading_entry:
-                        for subheading_entry in heading_entry["subheadings"]:
-                            subheading_text = subheading_entry["title"]
-                            subheading_page = subheading_entry["page_reference"] - 1  # Convert to 0-indexed
-                            
-                            # Add to our hierarchy
-                            structure["hierarchy"][heading_text].append(subheading_text)
-                            structure["page_mapping"][subheading_text] = subheading_page
+            print(f"Claude 3.5 Sonnet successfully extracted enhanced document structure with {len(claude_structure['document_structure'])} main headings")
+            
+            # Now map the Claude structure to our expected format
+            for heading_entry in claude_structure["document_structure"]:
+                heading_text = heading_entry["heading"]
+                page_reference = heading_entry["page_reference"] - 1  # Convert to 0-indexed
                 
-                # If Claude didn't find any headings, create a simple structure with the document title
-                if not structure["headings"]:
-                    print("WARNING: Claude didn't detect any headings. Creating simple title-based structure.")
-                    self._create_simple_structure(structure, reader)
+                # Add to our structure
+                structure["headings"].append(heading_text)
+                structure["hierarchy"][heading_text] = []
+                structure["page_mapping"][heading_text] = page_reference
                 
+                # Process subheadings
+                if "subheadings" in heading_entry:
+                    for subheading_entry in heading_entry["subheadings"]:
+                        subheading_text = subheading_entry["title"]
+                        subheading_page = subheading_entry["page_reference"] - 1  # Convert to 0-indexed
+                        
+                        # Add to our hierarchy
+                        structure["hierarchy"][heading_text].append(subheading_text)
+                        structure["page_mapping"][subheading_text] = subheading_page
+            
+            # If Claude didn't find any headings, create a simple structure with the document title
+            if not structure["headings"]:
+                print("WARNING: Claude didn't detect any headings. Creating simple title-based structure.")
+                self._create_simple_structure(structure, reader)
+                        
                 # Store the original Claude structure for later use in extracting structured content
                 structure["claude_structure"] = claude_structure
                 
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"Error parsing Claude response as JSON or missing key: {str(e)}")
-                print(f"JSON string sample: {json_str[:200]}...")
-                
-                # Create a basic document structure using the title and page structure
-                print("Creating fallback document structure from PDF content")
-                self._create_simple_structure(structure, reader)
-                
-                # Try to salvage any partial structure from Claude's response
-                try:
-                    fallback_structure = self._create_default_structure_with_partial_content(json_str)
-                    fallback_json = json.loads(fallback_structure)
-                    if fallback_json["document_structure"] and len(fallback_json["document_structure"]) > 1:
-                        print(f"Successfully salvaged partial structure with {len(fallback_json['document_structure'])} headings")
-                        structure["claude_structure"] = fallback_json
-                    else:
-                        structure["claude_structure"] = self._generate_page_based_structure(reader)
-                except Exception as fallback_error:
-                    print(f"Error creating fallback structure: {str(fallback_error)}")
-                    structure["claude_structure"] = self._generate_page_based_structure(reader)
-        
         except Exception as e:
             print(f"Error calling Claude API for enhanced document structure: {str(e)}")
             # Fallback to creating a basic document structure
@@ -794,8 +763,505 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                     "page_reference": page_num + 1,
                     "visual_references": []
                 })
+            
+        return structure
+    
+    def _extract_document_structure_with_enhanced_claude_images(self, reader: PdfReader, doc: fitz.Document) -> Dict[str, Any]:
+        """
+        Extract document structure using Claude API with base64 encoded page images instead of text.
+        
+        Args:
+            reader: PyPDF2 PdfReader object
+            doc: PyMuPDF document object
+            
+        Returns:
+            Document structure dictionary generated by Claude with enhanced prompting using images
+        """
+        # Structure to store document hierarchy (same as text-based method)
+        structure = {
+            "headings": [],
+            "hierarchy": {},
+            "page_mapping": {},
+            "page_images": {},
+            "metadata": {}  # Metadata dictionary
+        }
+        
+        # Extract document title and metadata (same as text-based method)
+        try:
+            if hasattr(doc, 'name') and doc.name:
+                file_path = doc.name
+                file_name = os.path.basename(file_path)
+                file_name_without_ext = os.path.splitext(file_name)[0]
+                structure["title"] = file_name_without_ext
+                structure["metadata"]["title"] = structure["title"]
+                print(f"Using filename as title: {structure['title']}")
+            else:
+                if doc.metadata and doc.metadata.get('title'):
+                    structure["title"] = doc.metadata.get('title')
+                    structure["metadata"]["title"] = structure["title"]
+                else:
+                    first_page_text = reader.pages[0].extract_text()
+                    first_lines = first_page_text.split('\n')
+                    if first_lines and len(first_lines[0]) < 100:
+                        structure["title"] = first_lines[0].strip()
+                        structure["metadata"]["title"] = structure["title"]
+        except Exception as e:
+            print(f"Error extracting document title: {str(e)}")
+            structure["title"] = f"Document {uuid.uuid4().hex[:8]}"
+            structure["metadata"]["title"] = structure["title"]
+        
+        # Extract basic metadata
+        try:
+            structure["metadata"]["file_size"] = os.path.getsize(doc.name)
+            structure["metadata"]["file_size_kb"] = round(structure["metadata"]["file_size"] / 1024, 2)
+        except Exception as e:
+            print(f"Error extracting file size: {str(e)}")
+            structure["metadata"]["file_size"] = 0
+            structure["metadata"]["file_size_kb"] = 0
+        
+        # Extract additional PDF metadata
+        try:
+            if doc.metadata:
+                structure["metadata"]["author"] = doc.metadata.get('author', 'Unknown')
+                structure["metadata"]["keywords"] = doc.metadata.get('keywords', '')
+                structure["metadata"]["subject"] = doc.metadata.get('subject', '')
+                structure["metadata"]["producer"] = doc.metadata.get('producer', '')
+                structure["metadata"]["creator"] = doc.metadata.get('creator', '')
+                
+                # Creation date
+                creation_date = doc.metadata.get('creationDate', None)
+                if creation_date:
+                    if isinstance(creation_date, str) and creation_date.startswith('D:'):
+                        date_str = creation_date[2:16]
+                        try:
+                            from datetime import datetime
+                            parsed_date = datetime.strptime(date_str, '%Y%m%d%H%M%S')
+                            structure["metadata"]["creation_date"] = parsed_date.isoformat()
+                        except:
+                            structure["metadata"]["creation_date"] = creation_date
+                    else:
+                        structure["metadata"]["creation_date"] = creation_date
+        except Exception as e:
+            print(f"Error extracting document metadata: {str(e)}")
+        
+        # Store page count
+        structure["metadata"]["page_count"] = len(reader.pages)
+        
+        # Extract text and render page images
+        page_images_data = []
+        for page_num in range(len(reader.pages)):
+            # Extract text (for fallback and for Claude to use)
+            page = reader.pages[page_num]
+            page_text = page.extract_text()
+            
+            # Render the page as an image
+            pix = doc.load_page(page_num).get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Resize image if too large
+            max_width = 1200
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.LANCZOS)
+            
+            # Convert to base64 for storage and for Claude
+            buffered = io.BytesIO()
+            img.save(buffered, format="JPEG", quality=85)
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            
+            # Store the page image
+            structure["page_images"][page_num] = img_str
+            
+            # Add to the images data for Claude
+            page_images_data.append({
+                "page_number": page_num + 1,  # 1-indexed for Claude
+                "image_base64": img_str,
+                "text_content": page_text
+            })
+        
+        # Prepare the message for Claude with both images and text
+        image_content_parts = []
+        
+        # Add introduction for Claude
+        image_content_parts.append({
+            "type": "text", 
+            "text": """You are an expert document analyzer. Your task is to extract the hierarchical structure of this PDF document with extremely high precision and accuracy.
+
+I will provide you with the images of each page in the document along with OCR-extracted text from each page.
+
+Extract the following elements:
+1. HEADINGS AND SUBHEADINGS with their hierarchical relationships
+2. CONTEXT (text content under each heading/subheading)
+3. PAGE REFERENCES (page numbers where sections begin, 1-indexed)
+4. VISUAL ELEMENTS (figures, tables, charts, diagrams)
+
+Please respond in a structured text format using the following markers:
+--HEADING-- Main Heading Title (Page: X)
+--CONTENT-- Full text of content under this heading...
+
+--SUBHEADING-- Subheading Title (Page: X)
+--CONTENT-- Full text of content under this subheading...
+
+--VISUAL-- Figure 1: Caption text (Page: X)
+
+# DOCUMENT PAGES:
+"""
+        })
+        
+        # Add each page as an image+text pair
+        for page_data in page_images_data:
+            # Add page header
+            image_content_parts.append({
+                "type": "text",
+                "text": f"\n--- Page {page_data['page_number']} ---\n"
+            })
+            
+            # Add page image
+            image_content_parts.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": page_data['image_base64']
+                }
+            })
+            
+            # Add OCR text from page
+            image_content_parts.append({
+                "type": "text",
+                "text": f"\nExtracted text from page {page_data['page_number']}:\n{page_data['text_content']}\n"
+            })
+        
+        # Call Claude API with images
+        print(f"Sending document to Claude 3.5 Sonnet with {len(page_images_data)} page images")
+        try:
+            # Use Claude API with multimodal content
+            response = self.claude_client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=8192,
+                temperature=0,
+                system="You are an expert document structure analyzer specializing in extracting hierarchical document structure with perfect accuracy. You excel at identifying headings, subheadings, body content, and visual elements like figures, tables, and charts from both document images and text. Extract document structure as plaintext with specific markers. Always use the exact markers specified in the prompt.",
+                messages=[
+                    {"role": "user", "content": image_content_parts}
+                ]
+            )
+            
+            # Extract the response content
+            claude_response = response.content[0].text
+            
+            # Log response for debugging
+            print(f"Received Claude image-based response with {len(claude_response)} characters")
+            
+            # Save the Claude response to a file for debugging
+            self._save_claude_response_to_file(claude_response, f"{structure.get('title', 'untitled')}_image_based")
+            
+            # Parse the structured text response into our JSON format
+            try:
+                claude_structure = self._parse_structured_text_to_json(claude_response)
+                print(f"Successfully parsed Claude image-based response into structured JSON")
+            except Exception as e:
+                print(f"Error parsing Claude image-based response: {str(e)}")
+                # Create a basic document structure
+                claude_structure = self._generate_page_based_structure(reader)
+            
+            print(f"Claude 3.5 Sonnet successfully extracted image-based document structure with {len(claude_structure['document_structure'])} main headings")
+            
+            # Map the Claude structure to our expected format
+            for heading_entry in claude_structure["document_structure"]:
+                heading_text = heading_entry["heading"]
+                page_reference = heading_entry["page_reference"] - 1  # Convert to 0-indexed
+                
+                # Add to our structure
+                structure["headings"].append(heading_text)
+                structure["hierarchy"][heading_text] = []
+                structure["page_mapping"][heading_text] = page_reference
+                
+                # Process subheadings
+                if "subheadings" in heading_entry:
+                    for subheading_entry in heading_entry["subheadings"]:
+                        subheading_text = subheading_entry["title"]
+                        subheading_page = subheading_entry["page_reference"] - 1  # Convert to 0-indexed
+                        
+                        # Add to our hierarchy
+                        structure["hierarchy"][heading_text].append(subheading_text)
+                        structure["page_mapping"][subheading_text] = subheading_page
+            
+            # If Claude didn't find any headings, create a simple structure with the document title
+            if not structure["headings"]:
+                print("WARNING: Claude didn't detect any headings from images. Creating simple title-based structure.")
+                self._create_simple_structure(structure, reader)
+            
+            # Store the original Claude structure for later use in extracting structured content
+            structure["claude_structure"] = claude_structure
+            
+        except Exception as e:
+            print(f"Error calling Claude API for image-based document structure: {str(e)}")
+            # Fallback to creating a basic document structure
+            title = structure["title"]
+            structure["headings"].append(title)
+            structure["hierarchy"][title] = []
+            structure["page_mapping"][title] = 0
+            
+            # Create a basic Claude structure for return
+            structure["claude_structure"] = {
+                "document_structure": [
+                    {
+                        "heading": title,
+                        "page_reference": 1,
+                        "subheadings": []
+                    }
+                ]
+            }
+            
+            # For each page, add a "Page X" entry
+            for page_num in range(len(reader.pages)):
+                page_text = reader.pages[page_num].extract_text()
+                structure["claude_structure"]["document_structure"][0]["subheadings"].append({
+                    "title": f"Page {page_num + 1}",
+                    "context": page_text[:2000] if page_text else "",  # Limit context to 2000 chars
+                    "page_reference": page_num + 1,
+                    "visual_references": []
+                })
         
         return structure
+    
+    def _parse_structured_text_to_json(self, text: str) -> Dict[str, Any]:
+        """
+        Parse the structured text response from Claude into JSON format.
+        
+        The text is expected to have markers like --HEADING--, --SUBHEADING--, etc.
+        
+        Args:
+            text: Structured text from Claude
+            
+        Returns:
+            Structured JSON in the expected format
+        """
+        # Initialize the structure
+        document_structure = {
+            "document_structure": []
+        }
+        
+        # Initialize variables to track current context
+        current_heading = None
+        current_subheading = None
+        
+        # Split the text into lines for processing
+        lines = text.split('\n')
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
+                continue
+            
+            # Process heading markers
+            if line.startswith('--HEADING--'):
+                # Extract heading text and page number
+                heading_content = line[len('--HEADING--'):].strip()
+                heading_text, page_ref = self._extract_text_and_page(heading_content)
+                
+                # Create new heading entry with context and visual_references fields
+                current_heading = {
+                    "heading": heading_text,
+                    "page_reference": page_ref,
+                    "context": "",  # Add context field directly to heading
+                    "visual_references": [],  # Add visual references directly to heading
+                    "subheadings": []
+                }
+                
+                # Add to document structure
+                document_structure["document_structure"].append(current_heading)
+                # Reset current subheading
+                current_subheading = None
+                
+            # Process subheading markers
+            elif line.startswith('--SUBHEADING--'):
+                if current_heading is None:
+                    # If we encounter a subheading without a heading, create a default heading
+                    current_heading = {
+                        "heading": "Document Content",
+                        "page_reference": 1,
+                        "context": "",
+                        "visual_references": [],
+                        "subheadings": []
+                    }
+                    document_structure["document_structure"].append(current_heading)
+                
+                # Extract subheading text and page number
+                subheading_content = line[len('--SUBHEADING--'):].strip()
+                subheading_text, page_ref = self._extract_text_and_page(subheading_content)
+                
+                # Create new subheading entry but don't add it yet - wait to see if it has content
+                current_subheading = {
+                    "title": subheading_text,
+                    "page_reference": page_ref,
+                    "context": "",
+                    "visual_references": []
+                }
+                
+                # Look ahead to see if there's any content for this subheading
+                has_content = False
+                j = i + 1
+                while j < len(lines) and not any(lines[j].strip().startswith(marker) for marker in ['--HEADING--', '--SUBHEADING--']):
+                    if lines[j].strip().startswith('--CONTENT--') or lines[j].strip().startswith('--VISUAL--'):
+                        has_content = True
+                        break
+                    j += 1
+                
+                # Only add the subheading if it has content or visuals
+                if has_content:
+                    current_heading["subheadings"].append(current_subheading)
+                else:
+                    # Reset to None since we're not using it
+                    current_subheading = None
+            
+            # Process content markers
+            elif line.startswith('--CONTENT--'):
+                content_text = line[len('--CONTENT--'):].strip()
+                
+                # Get all lines of content until the next marker
+                content_lines = [content_text]
+                j = i + 1
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    # Break if we hit another marker
+                    if any(next_line.startswith(marker) for marker in ['--HEADING--', '--SUBHEADING--', '--CONTENT--', '--VISUAL--']):
+                        break
+                    # Collect non-empty content lines
+                    if next_line:
+                        content_lines.append(next_line)
+                    j += 1
+                i = j - 1  # Update i to the last processed line
+                
+                # Join all content lines
+                full_content = ' '.join(content_lines)
+                
+                # Add content to the current context
+                if current_subheading is not None:
+                    # Content belongs to a subheading
+                    current_subheading["context"] = full_content
+                elif current_heading is not None:
+                    # Content belongs directly to the heading
+                    current_heading["context"] = full_content
+            
+            # Process visual markers
+            elif line.startswith('--VISUAL--'):
+                # Extract visual info and page number
+                visual_content = line[len('--VISUAL--'):].strip()
+                visual_text, page_ref = self._extract_text_and_page(visual_content)
+                
+                # Create visual reference
+                visual_ref = {
+                    "image_caption": visual_text,
+                    "image_reference": f"figure_{len(current_subheading['visual_references'])+1 if current_subheading else len(current_heading['visual_references'])+1 if current_heading else 1:03d}",
+                    "page_reference": page_ref
+                }
+                
+                # Add to appropriate context
+                if current_subheading is not None:
+                    # Visual belongs to a subheading
+                    current_subheading["visual_references"].append(visual_ref)
+                elif current_heading is not None:
+                    # Visual belongs directly to the heading
+                    current_heading["visual_references"].append(visual_ref)
+                else:
+                    # If we don't have a heading, create default heading
+                    current_heading = {
+                        "heading": "Document Content",
+                        "page_reference": 1,
+                        "context": "",
+                        "visual_references": [visual_ref],
+                        "subheadings": []
+                    }
+                    document_structure["document_structure"].append(current_heading)
+            
+            i += 1
+        
+        # Clean up: Filter out headings without any content or subheadings
+        document_structure["document_structure"] = [
+            heading for heading in document_structure["document_structure"]
+            if heading["context"].strip() or heading["visual_references"] or heading["subheadings"]
+        ]
+        
+        # Also cleanup subheadings with no content and no visual references
+        for heading in document_structure["document_structure"]:
+            heading["subheadings"] = [
+                subheading for subheading in heading["subheadings"]
+                if subheading["context"].strip() or subheading["visual_references"]
+            ]
+        
+        # Final check: if we parsed nothing useful, create a default structure
+        if not document_structure["document_structure"]:
+            document_structure["document_structure"] = [{
+                "heading": "Document Content",
+                "page_reference": 1,
+                "context": "Document content could not be structured properly.",
+                "visual_references": [],
+                "subheadings": []
+            }]
+        
+        return document_structure
+    
+    def _extract_text_and_page(self, text: str) -> tuple:
+        """
+        Extract text and page number from formatted string like "Text (Page: X)"
+        
+        Args:
+            text: Formatted text string
+            
+        Returns:
+            Tuple of (text, page_number)
+        """
+        # Regular expression to extract page number
+        match = re.search(r'(.*?)\s*\(?Page:\s*(\d+)\)?$', text)
+        
+        if match:
+            return match.group(1).strip(), int(match.group(2))
+        else:
+            # If no page reference found, return text as is with default page 1
+            return text.strip(), 1
+    
+    def get_page_image(self, document_id: str, page_number: int) -> Optional[str]:
+        """
+        Get a specific page image for a document.
+        
+        Args:
+            document_id: Document ID
+            page_number: Page number (0-indexed)
+            
+        Returns:
+            Base64 encoded image data or None if not found
+        """
+        try:
+            with self.driver.session() as session:
+                # First try to get the image from the Page node if it exists
+                result = session.run(
+                    """
+                    MATCH (d:Document {id: $id})-[:HAS_PAGE]->(p:Page {number: $page_number})
+                    RETURN p.image as page_image
+                    """,
+                    id=document_id,
+                    page_number=page_number
+                )
+                
+                record = result.single()
+                if record and record["page_image"]:
+                    return record["page_image"]
+                
+                # If not found in Page node, try to get from document structure
+                document_structure = self.get_document_structure(document_id)
+                if "page_images" in document_structure and str(page_number) in document_structure["page_images"]:
+                    return document_structure["page_images"][str(page_number)]
+                
+                # If still not found, return None
+                return None
+                
+        except Exception as e:
+            print(f"Error getting page image: {str(e)}")
+            return None
     
     def _extract_and_fix_json(self, text: str) -> str:
         """
@@ -1799,4 +2265,42 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
                 documents.append(document)
                 
             return documents
+    
+    def _save_claude_response_to_file(self, response_text: str, document_title: str) -> None:
+        """
+        Save Claude's raw response to a text file for debugging and analysis.
+        
+        Args:
+            response_text: The raw text response from Claude
+            document_title: The title of the document being processed (for filename)
+        """
+        try:
+            # Create a logs directory if it doesn't exist
+            logs_dir = os.path.join(os.getcwd(), "claude_logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            
+            # Create a sanitized filename from the document title
+            # Remove any characters that aren't alphanumeric, underscore, or hyphen
+            sanitized_title = re.sub(r'[^\w\-]', '_', document_title)
+            
+            # Create a timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Create the filename
+            filename = f"{sanitized_title}_{timestamp}.txt"
+            filepath = os.path.join(logs_dir, filename)
+            
+            # Save the response to the file
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # Add a header with metadata
+                f.write(f"# Claude Response for: {document_title}\n")
+                f.write(f"# Timestamp: {datetime.now().isoformat()}\n")
+                f.write(f"# Response length: {len(response_text)} characters\n\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(response_text)
+            
+            print(f"Saved Claude response to {filepath}")
+            
+        except Exception as e:
+            print(f"Error saving Claude response to file: {str(e)}")
         

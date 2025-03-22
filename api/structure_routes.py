@@ -1,9 +1,10 @@
 """Document structure API endpoints"""
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 import tempfile
 import os
 import uuid
 from datetime import datetime
+import base64
 
 from services.document_service import get_document_processor
 
@@ -442,17 +443,67 @@ def get_document_page(document_id, page_number):
         page_number: Page number (1-indexed in URL, converted to 0-indexed for storage)
         
     Returns:
-        JSON with page image data
+        Image data as JPEG response
     """
     try:
         document_processor = get_document_processor()
         # Convert from 1-indexed (API) to 0-indexed (storage)
         page_data = document_processor.get_page_image(document_id, page_number - 1)
-        return jsonify(page_data), 200
+        
+        if not page_data:
+            return jsonify({"error": f"Page {page_number} not found for document {document_id}"}), 404
+        
+        return Response(
+            base64.b64decode(page_data),
+            mimetype="image/jpeg"
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         print(f"Error in get_document_page: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@structure_bp.route('/document/<document_id>/all-pages-base64', methods=['GET'])
+def get_all_page_images_base64(document_id):
+    """
+    Get all page images for a document as base64 encoded strings
+    
+    Returns:
+        JSON with page numbers as keys and base64 encoded images as values
+    """
+    try:
+        document_processor = get_document_processor()
+        
+        # Check if document exists
+        if not document_processor.document_exists(document_id):
+            return jsonify({"error": f"Document with ID {document_id} not found"}), 404
+        
+        # Get document structure that contains page images
+        document_structure = document_processor.get_document_structure(document_id)
+        
+        # Extract just the page images
+        if "page_images" in document_structure:
+            page_images = document_structure["page_images"]
+            
+            # Convert numeric keys (page numbers) from string to int for better client-side handling
+            result = {}
+            for page_num, image_data in page_images.items():
+                # Page numbers in the structure are 0-indexed, convert to 1-indexed for API consistency
+                page_num_int = int(page_num) + 1
+                result[str(page_num_int)] = image_data
+                
+            return jsonify({
+                "document_id": document_id,
+                "total_pages": len(page_images),
+                "page_images": result
+            })
+        else:
+            return jsonify({"error": "Page images not found in document structure"}), 404
+            
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_all_page_images_base64: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @structure_bp.route('/document/<document_id>/visual/<reference>', methods=['GET'])
