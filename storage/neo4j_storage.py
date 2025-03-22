@@ -1806,7 +1806,7 @@ Please respond in a structured text format using the following markers:
                 """
                 MATCH (d:Document {id: $id})
                 OPTIONAL MATCH (d)-[:HAS_HEADING]->(h:Heading)
-                OPTIONAL MATCH (h)-[:HAS_SUBHEADING]->(s:Subheading)
+                OPTIONAL MATCH (h)-[:HAS_SUBHEADING]->(s:Heading {type: 'sub'})
                 RETURN d, collect(DISTINCT h) as headings, collect(DISTINCT s) as subheadings
                 """,
                 id=document_id
@@ -1854,8 +1854,8 @@ Please respond in a structured text format using the following markers:
                     # Get subheadings for this heading
                     result = session.run(
                         """
-                        MATCH (h:Heading {id: $heading_id})-[:HAS_SUBHEADING]->(s:Subheading)
-                        RETURN s ORDER BY s.page, s.id
+                        MATCH (h:Heading {id: $heading_id})-[:HAS_SUBHEADING]->(s:Heading {type: 'sub'})
+                        RETURN s ORDER BY s.page_reference, s.id
                         """,
                         heading_id=heading_node.get("id", "")
                     )
