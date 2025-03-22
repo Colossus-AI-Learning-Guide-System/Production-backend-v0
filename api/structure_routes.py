@@ -22,13 +22,14 @@ def upload_document_structure():
         print("Received document structure upload request")
         data = request.json
         file_base64 = data.get('file', '')
+        filename = data.get('filename', '')
         
         if not file_base64:
             return jsonify({"error": "No file provided"}), 400
         
         # Process the document and store in Neo4j
         document_processor = get_document_processor()
-        document_id = document_processor.process_base64_document(file_base64)
+        document_id = document_processor.process_base64_document(file_base64, filename)
         
         # Get the processed document structure
         document_structure = document_processor.get_document_structure(document_id)

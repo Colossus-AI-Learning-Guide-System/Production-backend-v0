@@ -135,12 +135,13 @@ class Neo4jDocumentProcessor:
             traceback.print_exc()
             raise Exception(f"Error processing document: {str(e)}")
     
-    def process_base64_document(self, base64_data: str) -> str:
+    def process_base64_document(self, base64_data: str, original_filename: str = None) -> str:
         """
         Process a PDF document from base64 encoded data.
         
         Args:
             base64_data: Base64 encoded PDF data
+            original_filename: Original filename of the document (optional)
             
         Returns:
             document_id: Unique identifier for the processed document
@@ -158,8 +159,8 @@ class Neo4jDocumentProcessor:
                 # Generate a unique ID
                 document_id = str(uuid.uuid4())
                 
-                # Process the PDF file
-                document_id = self.process_document(temp_file_path)
+                # Process the PDF file with the original filename if provided
+                document_id = self.process_document(temp_file_path, original_filename)
                 
                 # Store the raw PDF data directly
                 with self.driver.session() as session:
@@ -1721,4 +1722,81 @@ Respond ONLY with the JSON output. Do not include any explanations or additional
         except Exception as e:
             print(f"Error storing PDF data: {str(e)}")
             return False
+    
+    def _get_document_page_count(self, document_id: str) -> int:
+        """
+        Get the page count for a document.
+        
+        Args:
+            document_id: Document ID
+            
+        Returns:
+            Page count as integer
+        """
+        with self.driver.session() as session:
+            # Get page count from document metadata if available
+            result = session.run(
+                "MATCH (d:Document {id: $id}) RETURN d.page_count as page_count",
+                id=document_id
+            )
+            record = result.single()
+            if record and record["page_count"] is not None:
+                return record["page_count"]
+            
+            # Otherwise count the pages
+            result = session.run(
+                """
+                MATCH (d:Document {id: $id})-[:HAS_PAGE]->(p:Page)
+                RETURN count(p) as page_count
+                """,
+                id=document_id
+            )
+            record = result.single()
+            return record["page_count"] if record else 0
+    
+    def get_all_documents_with_metadata(self) -> List[Dict[str, Any]]:
+        """
+        Get all documents with their metadata.
+        
+        Returns:
+            List of document objects with metadata
+        """
+        with self.driver.session() as session:
+            # Query all documents with their metadata
+            result = session.run(
+                """
+                MATCH (d:Document)
+                OPTIONAL MATCH (d)-[:HAS_PAGE]->(p:Page)
+                WITH d, count(p) as page_count
+                RETURN d.id as id, 
+                       d.title as title, 
+                       d.upload_date as upload_date,
+                       d.page_count as stored_page_count,
+                       page_count,
+                       d.file_size_kb as file_size_kb,
+                       d.author as author,
+                       d.creation_date as creation_date,
+                       d.enhanced_content_timestamp as enhanced_timestamp
+                ORDER BY d.upload_date DESC
+                """
+            )
+            
+            documents = []
+            for record in result:
+                # Use stored page count if available, otherwise use counted pages
+                final_page_count = record["stored_page_count"] if record["stored_page_count"] is not None else record["page_count"]
+                
+                document = {
+                    "id": record["id"],
+                    "title": record["title"] if record["title"] else "Untitled Document",
+                    "upload_date": record["upload_date"],
+                    "page_count": final_page_count,
+                    "file_size_kb": record["file_size_kb"] if record["file_size_kb"] is not None else 0,
+                    "author": record["author"] if record["author"] is not None else "Unknown",
+                    "creation_date": record["creation_date"],
+                    "has_enhanced_content": record["enhanced_timestamp"] is not None
+                }
+                documents.append(document)
+                
+            return documents
         

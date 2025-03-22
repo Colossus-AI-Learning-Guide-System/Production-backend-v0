@@ -30,12 +30,13 @@ class Neo4jDocumentProcessor:
         """Close the Neo4j driver connection."""
         self.driver.close()
     
-    def process_document(self, pdf_path: str) -> str:
+    def process_document(self, pdf_path: str, original_filename: str = None) -> str:
         """
         Process a PDF document and store its structure in Neo4j.
         
         Args:
             pdf_path: Path to the PDF file
+            original_filename: Original filename of the document (optional)
             
         Returns:
             document_id: Unique identifier for the processed document
@@ -53,6 +54,14 @@ class Neo4jDocumentProcessor:
             # Process document structure
             structure = self._extract_document_structure(reader, doc)
             
+            # Override title with original filename if provided
+            if original_filename:
+                filename_without_ext = os.path.splitext(original_filename)[0]
+                structure["title"] = filename_without_ext
+                if "metadata" in structure:
+                    structure["metadata"]["title"] = structure["title"]
+                print(f"Title set to original filename: {structure['title']}")
+            
             # Store structure in Neo4j
             self._store_document_structure(document_id, structure)
             
@@ -61,12 +70,13 @@ class Neo4jDocumentProcessor:
         except Exception as e:
             raise Exception(f"Error processing document: {str(e)}")
     
-    def process_base64_document(self, base64_data: str) -> str:
+    def process_base64_document(self, base64_data: str, original_filename: str = None) -> str:
         """
         Process a PDF document from base64 encoded data.
         
         Args:
             base64_data: Base64 encoded PDF data
+            original_filename: Original filename of the document (optional)
             
         Returns:
             document_id: Unique identifier for the processed document
@@ -79,14 +89,14 @@ class Neo4jDocumentProcessor:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
                 temp_file.write(pdf_data)
                 temp_file_path = temp_file.name
+                
+            # Process the PDF file with the original filename if provided
+            document_id = self.process_document(temp_file_path, original_filename)
             
-            try:
-                # Process the PDF file
-                document_id = self.process_document(temp_file_path)
-                return document_id
-            finally:
-                # Clean up temporary file
-                os.unlink(temp_file_path)
+            # Clean up
+            os.unlink(temp_file_path)
+            
+            return document_id
                 
         except Exception as e:
             raise Exception(f"Error processing base64 document: {str(e)}")
