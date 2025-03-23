@@ -4,6 +4,27 @@
 
 cd "D:\SDGP Project\PythonEnv"; python -c "from flask import Flask; from api import structure_bp; app = Flask(__name__); app.register_blueprint(structure_bp, url_prefix='/api/structure'); print('Structure API Routes:'); [print(f'- {rule}') for rule in app.url_map.iter_rules() if rule.endpoint.startswith('structure')]"
 
+
+// View all nodes in the database
+MATCH (n) RETURN n LIMIT 100;
+
+// View all relationships
+MATCH ()-[r]->() RETURN r LIMIT 100;
+
+// Count all nodes by label
+MATCH (n) RETURN labels(n) AS Label, count(*) AS Count;
+
+// View document nodes (assuming they have a Document label)
+MATCH (d:Document) RETURN d LIMIT 25;
+
+// View document properties
+MATCH (d:Document) RETURN d.title, d.content, d.url LIMIT 10;
+
+// Find connections between documents
+MATCH (d1:Document)-[r]-(d2:Document) 
+RETURN d1.title, type(r), d2.title LIMIT 25;
+
+
 Structure API Routes:
 - /api/structure/upload
 - /api/structure/upload/raw
@@ -18,3 +39,8 @@ Structure API Routes:
 - /api/structure/document/<document_id>/page/<int:page_number>
 - /api/structure/document/<document_id>/visual/<reference>
 (PythonEnv) PS D:\SDGP Project\PythonEnv>
+
+
+To retrieve the original PDF, make a GET request to: /api/document/document/<document_id>/original-pdf
+This will return a JSON response with the original_pdf field containing the base64 encoded PDF
+The front-end can then convert this base64 string back to a PDF for display or download

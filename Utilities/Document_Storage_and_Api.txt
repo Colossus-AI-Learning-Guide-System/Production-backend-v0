@@ -1,0 +1,269 @@
+I'll help you implement an API endpoint to retrieve PDF documents from storage and suggest an appropriate database for storing PDFs in production.
+
+Looking at your current code, I can see you already have a method `get_document_pdf_data` in the `Neo4jDocumentProcessor` class that retrieves PDF data that was stored as base64 in Neo4j. Let's build on this to create a complete API endpoint.
+
+Ran tool
+Let me check the document_routes.py file to see the existing API endpoints for documents:
+
+Read file: api/document_routes.py
+Now I need to check the document_processor in the services directory to see if it has the necessary method:
+
+Ran tool
+Let me check the document service:
+
+Read file: services/document_service.py
+I need to create our new API endpoint in document_routes.py to retrieve PDF data. I'll also need to verify that the delete_document method exists since it was referenced in the document_routes.py. Let me check if there's a clear_document method in Neo4jDocumentProcessor:
+
+Ran tool
+I see there's a discrepancy here - in document_routes.py it's using `clear_document` but the actual method is called `delete_document`. Let me also check if I need to implement method to clean orphaned nodes:
+
+Ran tool
+Now I'll implement:
+1. The API endpoint to get PDF document
+2. Make sure our Neo4jDocumentProcessor has the `clean_orphaned_nodes` method
+3. Fix the discrepancy between `clear_document` and `delete_document`
+
+Let's start with implementing the API endpoint to get PDF document:
+
+```python:api/document_routes.py
+// ... existing code ...
+@document_bp.route('/document/<document_id>/metadata', methods=['GET'])
+def get_document_metadata(document_id):
+    """Get metadata for a specific document"""
+    try:
+        document_processor = get_document_processor()
+        metadata = document_processor.get_document_metadata(document_id)
+        return jsonify(metadata)
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in get_document_metadata: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@document_bp.route('/document/<document_id>/pdf', methods=['GET'])
+def get_document_pdf(document_id):
+    """Get the full PDF document"""
+    try:
+        document_processor = get_document_processor()
+        pdf_data = document_processor.get_document_pdf_data(document_id)
+        
+        if pdf_data is None:
+            return jsonify({"error": "PDF data not found for this document"}), 404
+            
+        # Return the PDF data as base64 string for frontend to display
+        pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
+        return jsonify({
+            "document_id": document_id,
+            "pdf_data": pdf_base64
+        })
+    except Exception as e:
+        print(f"Error in get_document_pdf: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+// ... existing code ...
+```
+Now let's fix the discrepancy between `clear_document` and `delete_document` methods. Let's update the `document_routes.py` to use the correct method name:
+
+```python:api/document_routes.py
+// ... existing code ...
+        
+        # Delete from Neo4j with cascading delete
+        document_processor = get_document_processor()
+        neo4j_success = document_processor.delete_document(document_id)
+        
+        # Delete RAG index
+// ... existing code ...
+```
+Next, I need to implement the `clean_orphaned_nodes` method in the Neo4jDocumentProcessor class:
+
+```python:storage/neo4j_storage.py
+// ... existing code ...
+    def delete_document(self, document_id: str) -> bool:
+        """
+        Delete a document and all related nodes from Neo4j.
+        
+        Args:
+            document_id: Document ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        with self.driver.session() as session:
+            try:
+                # First check if document exists
+                if not self.document_exists(document_id):
+                    raise ValueError(f"Document with ID {document_id} not found")
+                
+                # Delete all relationships and nodes related to the document
+                # This includes: Pages, Headings, and any other connected nodes
+                session.run(
+                    """
+                    MATCH (d:Document {id: $id})
+                    OPTIONAL MATCH (d)-[r1]->(n1)
+                    OPTIONAL MATCH (n1)-[r2]->(n2)
+                    OPTIONAL MATCH (n2)-[r3]->(n3)
+                    DETACH DELETE n3, n2, n1, d
+                    """,
+                    id=document_id
+                )
+                
+                # Verify the document is deleted
+                result = session.run(
+                    "MATCH (d:Document {id: $id}) RETURN count(d) as count",
+                    id=document_id
+                )
+                record = result.single()
+                
+                if record and record["count"] > 0:
+                    print(f"Warning: Document {document_id} was not fully deleted")
+                    return False
+                
+                print(f"Document {document_id} and all related nodes successfully deleted")
+                return True
+                
+            except Exception as e:
+                print(f"Error deleting document {document_id}: {str(e)}")
+                return False
+    
+    def clean_orphaned_nodes(self) -> int:
+        """
+        Clean up orphaned nodes that are not connected to any document.
+        This can happen after document deletion if some nodes were not properly deleted.
+        
+        Returns:
+            Number of orphaned nodes deleted
+        """
+        with self.driver.session() as session:
+            try:
+                # Delete orphaned pages
+                result_pages = session.run(
+                    """
+                    MATCH (p:Page)
+                    WHERE NOT EXISTS((p)<-[:HAS_PAGE]-())
+                    WITH count(p) AS count_pages
+                    MATCH (p:Page)
+                    WHERE NOT EXISTS((p)<-[:HAS_PAGE]-())
+                    DETACH DELETE p
+                    RETURN count_pages
+                    """
+                )
+                pages_deleted = result_pages.single()[0] if result_pages.single() else 0
+                
+                # Delete orphaned headings
+                result_headings = session.run(
+                    """
+                    MATCH (h:Heading)
+                    WHERE NOT EXISTS((h)<-[:HAS_HEADING]-()) AND NOT EXISTS((h)<-[:HAS_SUBHEADING]-())
+                    WITH count(h) AS count_headings
+                    MATCH (h:Heading)
+                    WHERE NOT EXISTS((h)<-[:HAS_HEADING]-()) AND NOT EXISTS((h)<-[:HAS_SUBHEADING]-())
+                    DETACH DELETE h
+                    RETURN count_headings
+                    """
+                )
+                headings_deleted = result_headings.single()[0] if result_headings.single() else 0
+                
+                # Delete other orphaned nodes (VisualReference, etc.)
+                result_others = session.run(
+                    """
+                    MATCH (n)
+                    WHERE NOT (n:Document) AND NOT EXISTS((n)<-[]-())
+                    WITH count(n) AS count_others
+                    MATCH (n)
+                    WHERE NOT (n:Document) AND NOT EXISTS((n)<-[]-())
+                    DETACH DELETE n
+                    RETURN count_others
+                    """
+                )
+                others_deleted = result_others.single()[0] if result_others.single() else 0
+                
+                total_deleted = pages_deleted + headings_deleted + others_deleted
+                print(f"Cleaned up {total_deleted} orphaned nodes: {pages_deleted} Pages, {headings_deleted} Headings, {others_deleted} other nodes")
+                
+                return total_deleted
+                
+            except Exception as e:
+                print(f"Error cleaning orphaned nodes: {str(e)}")
+                return 0
+    
+    def _extract_images_from_page(self, page: fitz.Page, page_idx: int, document_id: str) -> List[Dict[str, Any]]:
+// ... existing code ...
+```
+Great! I've now implemented:
+
+1. A new API endpoint `/document/<document_id>/pdf` to retrieve PDF documents
+2. Fixed the method name discrepancy from `clear_document` to `delete_document`
+3. Added a `clean_orphaned_nodes` method to remove orphaned nodes after document deletion
+
+Now I'll provide recommendations for databases for storing PDF files in a production environment:
+
+Ran tool
+Based on my research and the Neo4j implementation you already have, here are my database recommendations for storing PDF files in a production environment:
+
+```python:api/document_routes.py
+@document_bp.route('/document/<document_id>/pdf', methods=['GET'])
+def get_document_pdf(document_id):
+    """Get the full PDF document"""
+    try:
+        document_processor = get_document_processor()
+        pdf_data = document_processor.get_document_pdf_data(document_id)
+        
+        if pdf_data is None:
+            return jsonify({"error": "PDF data not found for this document"}), 404
+            
+        # Return the PDF data as base64 string for frontend to display
+        pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
+        return jsonify({
+            "document_id": document_id,
+            "pdf_data": pdf_base64
+        })
+    except Exception as e:
+        print(f"Error in get_document_pdf: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# NOTE: While storing PDFs in Neo4j works for now, for a production-ready solution,
+# consider migrating to one of these alternatives for better scalability and performance:
+# 1. MongoDB GridFS for direct document storage (easy to implement)
+# 2. AWS S3 or similar object storage (best performance/scalability)
+# 3. PostgreSQL with BYTEA type for smaller deployments
+# 4. Dedicated document management system for enterprise needs
+```
+Perfect! I've implemented all the necessary changes:
+
+1. Added a new API endpoint `/document/<document_id>/pdf` to retrieve PDF documents from the backend storage.
+2. Fixed the method name discrepancy in the document_routes.py file (from `clear_document` to `delete_document`).
+3. Implemented the `clean_orphaned_nodes` method in Neo4jDocumentProcessor to ensure proper cleanup after document deletion.
+4. Added recommendations for production-ready PDF storage solutions.
+
+Here's a summary of the database recommendations for storing PDFs in production:
+
+1. **MongoDB GridFS**: 
+   - Great for document-oriented applications
+   - Built specifically for storing large files like PDFs
+   - Easy integration with existing MongoDB infrastructure
+   - Good performance for moderate workloads
+
+2. **Cloud Object Storage (AWS S3, Google Cloud Storage, Azure Blob Storage)**:
+   - Highly scalable and cost-effective
+   - Excellent performance and durability
+   - Built-in CDN capabilities for faster access
+   - Pay only for what you use
+   - Ideal for production applications with varying loads
+
+3. **PostgreSQL with BYTEA type or Large Objects**:
+   - Good for smaller deployments or when you're already using PostgreSQL
+   - ACID compliant for transactional integrity
+   - Allows SQL queries on document metadata
+   - Works well for moderate file sizes and loads
+
+4. **Dedicated Document Management Systems**:
+   - For enterprise-level requirements with advanced features
+   - Built-in versioning, permissions, and workflow capabilities
+   - Often include OCR and content extraction features
+
+For your specific application, I would recommend:
+
+1. For the simplest path forward: Continue using Neo4j for small-scale deployments
+2. For better scalability: Implement AWS S3 or similar cloud storage 
+3. For the best production-ready solution: Use MongoDB GridFS if you need more metadata and query features, or S3 if pure storage performance is the priority
+
+The choice ultimately depends on your expected document sizes, expected traffic, and budget constraints.

@@ -80,6 +80,11 @@ def compat_structure_document_heading(document_id):
     """Compatibility endpoint for structure/document/:id/heading"""
     return redirect(f'/api/structure/document/{document_id}/heading?{request.query_string.decode()}')
 
+@app.route('/document/<document_id>/original-pdf', methods=['GET'])
+def compat_original_pdf(document_id):
+    """Compatibility endpoint for document/:id/original-pdf"""
+    return redirect(f'/api/document/document/{document_id}/original-pdf')
+
 # Initialize application components
 settings = get_settings()
 rag_model = init_rag_model(settings.RAG_MODEL_NAME)

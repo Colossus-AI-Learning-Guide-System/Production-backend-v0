@@ -38,13 +38,14 @@ class Neo4jDocumentProcessor:
         """Close the Neo4j driver connection."""
         self.driver.close()
     
-    def process_document(self, pdf_path: str, original_filename: str = None) -> str:
+    def process_document(self, pdf_path: str, original_filename: str = None, original_pdf_data: str = None) -> str:
         """
         Process a PDF document and store its structure in Neo4j.
         
         Args:
             pdf_path: Path to the PDF file
             original_filename: Original filename (optional)
+            original_pdf_data: Base64 encoded PDF data (optional)
             
         Returns:
             document_id: Unique identifier for the processed document
@@ -83,8 +84,14 @@ class Neo4jDocumentProcessor:
             # Store PDF data for future reprocessing if needed
             self._store_pdf_data(document_id, pdf_path)
             
+            # If original PDF data is not provided but we need it, read it from the file
+            if original_pdf_data is None and pdf_path:
+                with open(pdf_path, 'rb') as f:
+                    pdf_bytes = f.read()
+                    original_pdf_data = base64.b64encode(pdf_bytes).decode('utf-8')
+            
             # Store structure in Neo4j
-            self._store_document_structure(document_id, structure)
+            self._store_document_structure(document_id, structure, original_pdf=original_pdf_data)
             print(f"Document structure stored in Neo4j with ID: {document_id}")
             
             # Extract structured content from the enhanced Claude response
@@ -153,23 +160,14 @@ class Neo4jDocumentProcessor:
                 temp_file_path = temp_file.name
             
             try:
-                # Generate a unique ID
-                document_id = str(uuid.uuid4())
-                
                 # Process the PDF file with the original filename if provided
-                document_id = self.process_document(temp_file_path, original_filename)
+                # Also pass the original base64 data to be stored
+                document_id = self.process_document(
+                    temp_file_path, 
+                    original_filename=original_filename,
+                    original_pdf_data=base64_data
+                )
                 
-                # Store the raw PDF data directly
-                with self.driver.session() as session:
-                    session.run(
-                        """
-                        MATCH (d:Document {id: $id})
-                        SET d.pdf_data = $pdf_data
-                        """,
-                        id=document_id,
-                        pdf_data=base64_data
-                    )
-                    
                 return document_id
             finally:
                 # Clean up temporary file
@@ -1679,13 +1677,14 @@ Please respond in a structured text format using the following markers:
         
         return False
     
-    def _store_document_structure(self, document_id: str, structure: Dict[str, Any]) -> None:
+    def _store_document_structure(self, document_id: str, structure: Dict[str, Any], original_pdf: str = None) -> None:
         """
         Store document structure in Neo4j.
         
         Args:
             document_id: Document ID
             structure: Document structure dictionary
+            original_pdf: Base64 encoded PDF data (optional)
         """
         with self.driver.session() as session:
             # Create document node with enhanced metadata
@@ -1708,25 +1707,35 @@ Please respond in a structured text format using the following markers:
                 "creator": metadata.get("creator", "")
             }
             
-            # Create document node with all metadata
-            session.run(
-                """
-                CREATE (d:Document {
-                    id: $id, 
-                    title: $title, 
-                    upload_date: $upload_date,
-                    page_count: $page_count,
-                    file_size_kb: $file_size_kb,
-                    author: $author,
-                    creation_date: $creation_date,
-                    keywords: $keywords,
-                    subject: $subject,
-                    producer: $producer,
-                    creator: $creator
-                })
-                """,
-                **document_params
-            )
+            # Add original_pdf to parameters if provided
+            if original_pdf:
+                document_params["original_pdf"] = original_pdf
+            
+            # Create document node with all metadata and base query
+            base_query = """
+            CREATE (d:Document {
+                id: $id, 
+                title: $title, 
+                upload_date: $upload_date,
+                page_count: $page_count,
+                file_size_kb: $file_size_kb,
+                author: $author,
+                creation_date: $creation_date,
+                keywords: $keywords,
+                subject: $subject,
+                producer: $producer,
+                creator: $creator
+            """
+            
+            # Add original_pdf to query if provided
+            if original_pdf:
+                base_query += ", original_pdf: $original_pdf"
+            
+            # Close the query
+            base_query += "})"
+            
+            # Execute the query
+            session.run(base_query, **document_params)
             
             # Create page nodes and connect to document
             for page_num, image in structure["page_images"].items():
@@ -2303,4 +2312,26 @@ Please respond in a structured text format using the following markers:
             
         except Exception as e:
             print(f"Error saving Claude response to file: {str(e)}")
+    
+    def get_original_pdf(self, document_id: str) -> Optional[str]:
+        """
+        Get the original PDF data (base64 encoded) for a document.
+        
+        Args:
+            document_id: Document ID
+            
+        Returns:
+            Base64 encoded PDF data if available, None otherwise
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                "MATCH (d:Document {id: $id}) RETURN d.original_pdf as original_pdf",
+                id=document_id
+            )
+            
+            record = result.single()
+            if not record or not record["original_pdf"]:
+                return None
+                
+            return record["original_pdf"]
         

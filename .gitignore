@@ -146,3 +146,5 @@ flash-attention/
 **/flash_attn_2_cuda.so
 flash_attn_cuda.egg-info/
 flash_attn_cuda.so
+
+claude_logs/

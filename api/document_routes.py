@@ -45,7 +45,11 @@ def unified_upload():
             # 1. Process for document structure visualization FIRST
             print("Processing document structure...")
             document_processor = get_document_processor()
-            document_id = document_processor.process_document(temp_file_path, original_filename=filename)
+            document_id = document_processor.process_document(
+                temp_file_path, 
+                original_filename=filename,
+                original_pdf_data=file_base64  # Pass the original base64 data
+            )
             
             # Get the document structure immediately
             document_structure = document_processor.get_document_structure(document_id)
@@ -132,6 +136,17 @@ def upload_files():
                     store_collection_with_index=True,
                     overwrite=True
                 )
+                
+                # Store the document in Neo4j if needed
+                # (This is optional, as some legacy routes might not use Neo4j)
+                try:
+                    document_processor = get_document_processor()
+                    document_processor.process_document(
+                        temp_file_path,
+                        original_pdf_data=file_base64
+                    )
+                except Exception as doc_e:
+                    print(f"Warning: Document structure processing failed: {str(doc_e)}")
                 
                 # Update status
                 rag_indexing_status[document_id] = "completed"
@@ -235,5 +250,24 @@ def get_document_metadata(document_id):
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         print(f"Error in get_document_metadata: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@document_bp.route('/document/<document_id>/original-pdf', methods=['GET'])
+def get_original_document_pdf(document_id):
+    """Get the original PDF for a document in base64 format"""
+    try:
+        document_processor = get_document_processor()
+        original_pdf = document_processor.get_original_pdf(document_id)
+        
+        if not original_pdf:
+            return jsonify({"error": f"Original PDF not found for document: {document_id}"}), 404
+            
+        return jsonify({
+            "document_id": document_id,
+            "original_pdf": original_pdf,
+            "message": "Original PDF retrieved successfully"
+        }), 200
+    except Exception as e:
+        print(f"Error in get_original_document_pdf: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
