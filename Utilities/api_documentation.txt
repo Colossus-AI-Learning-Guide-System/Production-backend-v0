@@ -38,6 +38,18 @@ Structure API Routes:
 - /api/structure/document/<document_id>/enhanced
 - /api/structure/document/<document_id>/page/<int:page_number>
 - /api/structure/document/<document_id>/visual/<reference>
+
+# Delete document with RAG index - This endpoint deletes both the document structure from Neo4j and its RAG index.
+curl -X DELETE http://127.0.0.1:5002/api/document/document/{document_id}
+
+# Delete document structure only - This endpoint focuses only on deleting the document structure in Neo4j, not the RAG index.
+curl -X DELETE http://127.0.0.1:5002/api/structure/document/{document_id}
+
+# Using compatibility endpoint - legacy compatibility endpoint that redirects to the structure endpoint:
+curl -X DELETE http://127.0.0.1:5002/structure/document/{document_id}
+
+
+
 (PythonEnv) PS D:\SDGP Project\PythonEnv>
 
 
