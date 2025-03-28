@@ -2121,6 +2121,50 @@ Please respond in a structured text format using the following markers:
                 print(f"Error deleting document {document_id}: {str(e)}")
                 return False
     
+    def clear_document(self, document_id: str) -> bool:
+        """
+        Alias method for delete_document. Deletes a document and all related nodes from Neo4j.
+        
+        Args:
+            document_id: Document ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        return self.delete_document(document_id)
+    
+    def clean_orphaned_nodes(self) -> int:
+        """
+        Clean up orphaned nodes that are not connected to any document.
+        This can happen after document deletion if some nodes were not properly deleted.
+        
+        Returns:
+            Number of orphaned nodes cleaned up
+        """
+        with self.driver.session() as session:
+            # Query for orphaned nodes
+            result = session.run(
+                """
+                MATCH (n) WHERE NOT (n)-[:HAS_PAGE]->()
+                RETURN count(n) as orphaned_nodes
+                """
+            )
+            orphaned_nodes = result.single()["orphaned_nodes"]
+            
+            # Delete orphaned nodes
+            if orphaned_nodes > 0:
+                session.run(
+                    """
+                    MATCH (n) WHERE NOT (n)-[:HAS_PAGE]->()
+                    DETACH DELETE n
+                    """
+                )
+                print(f"Cleaned up {orphaned_nodes} orphaned nodes")
+            else:
+                print("No orphaned nodes to clean up")
+            
+            return orphaned_nodes
+    
     def _extract_images_from_page(self, page: fitz.Page, page_idx: int, document_id: str) -> List[Dict[str, Any]]:
         """
         Extract images from a page and save them as separate entities.

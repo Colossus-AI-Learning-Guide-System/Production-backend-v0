@@ -115,16 +115,106 @@ def delete_document_index(document_id, rag_model):
         Success status
     """
     try:
-        # Check if this RAG system has a delete_index method
+        print(f"Attempting to delete RAG index for document {document_id}")
+        
+        success = False
+        
+        # Method 1: Try using the RAG model's delete_index method if available
         if hasattr(rag_model, 'delete_index'):
-            rag_model.delete_index(document_id)
+            print(f"RAG model has delete_index method, calling it for {document_id}")
+            try:
+                result = rag_model.delete_index(document_id)
+                print(f"Delete index call result: {result}")
+                if result:
+                    success = True
+            except Exception as model_e:
+                print(f"Error in rag_model.delete_index: {str(model_e)}")
+        else:
+            print(f"WARNING: RAG model does not have delete_index method")
         
-        # Remove from status tracking
+        # Method 2: Try using force_delete_index from models.rag_models if available
+        if not success:
+            try:
+                from models.rag_models import force_delete_index
+                print(f"Trying force_delete_index function for {document_id}")
+                result = force_delete_index(document_id)
+                print(f"Force delete result: {result}")
+                if result:
+                    success = True
+            except (ImportError, AttributeError) as e:
+                print(f"Could not use force_delete_index: {str(e)}")
+                
+                # Method 3: Direct path-based deletion as fallback
+                try:
+                    import shutil
+                    from pathlib import Path
+                    import os
+                    
+                    # Try multiple paths
+                    paths_to_try = [
+                        os.path.join(".byaldi", document_id),
+                        os.path.abspath(os.path.join(".byaldi", document_id)),
+                        os.path.join(os.getcwd(), ".byaldi", document_id),
+                        str(Path(".byaldi") / document_id)
+                    ]
+                    
+                    for path in paths_to_try:
+                        if os.path.exists(path):
+                            print(f"Found index at: {path}")
+                            
+                            # Try method 1: shutil.rmtree
+                            try:
+                                print(f"Attempting to delete with shutil.rmtree: {path}")
+                                shutil.rmtree(path)
+                                if not os.path.exists(path):
+                                    print(f"Successfully deleted index at: {path}")
+                                    success = True
+                                    break
+                            except Exception as rmtree_e:
+                                print(f"shutil.rmtree failed: {str(rmtree_e)}")
+                            
+                            # Try method 2: os.system with rmdir (Windows)
+                            try:
+                                cmd = f'rmdir /S /Q "{path}"'
+                                print(f"Attempting OS command: {cmd}")
+                                os.system(cmd)
+                                if not os.path.exists(path):
+                                    print(f"Successfully deleted index with OS command at: {path}")
+                                    success = True
+                                    break
+                            except Exception as os_e:
+                                print(f"OS command failed: {str(os_e)}")
+                                
+                            # Try method 3: os.system with rm -rf (Unix-like)
+                            try:
+                                cmd = f'rm -rf "{path}"'
+                                print(f"Attempting Unix OS command: {cmd}")
+                                os.system(cmd)
+                                if not os.path.exists(path):
+                                    print(f"Successfully deleted index with Unix OS command at: {path}")
+                                    success = True
+                                    break
+                            except Exception as unix_e:
+                                print(f"Unix OS command failed: {str(unix_e)}")
+                except Exception as fallback_e:
+                    print(f"Error in fallback deletion: {str(fallback_e)}")
+        
+        # Remove from status tracking regardless of success
         if document_id in rag_indexing_status:
+            print(f"Removing document {document_id} from RAG indexing status tracking")
             del rag_indexing_status[document_id]
+        else:
+            print(f"Document {document_id} not found in RAG indexing status tracking")
         
-        return True
+        # Final verification
+        index_path = Path(".byaldi") / str(document_id)
+        if index_path.exists():
+            print(f"WARNING: Index directory still exists at {index_path} after all deletion attempts")
+            return success
+        else:
+            print(f"Verified index directory does not exist at {index_path}")
+            return True
     except Exception as e:
-        print(f"Warning: Could not delete RAG index for {document_id}: {str(e)}")
+        print(f"Error in delete_document_index for {document_id}: {str(e)}")
         return False
 

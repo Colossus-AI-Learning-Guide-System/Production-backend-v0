@@ -165,14 +165,69 @@ def upload_files():
 def delete_document(document_id):
     """Delete a document from the database and its RAG index"""
     try:
+        print(f"Received request to delete document {document_id}")
+        
         # Import the RAG model from app context
         from app import rag_model
         
-        # Delete from Neo4j with cascading delete
-        document_processor = get_document_processor()
-        neo4j_success = document_processor.clear_document(document_id)
+        neo4j_success = False
+        rag_success = False
         
-        # Delete RAG index
+        # Try Neo4j deletion first, but don't exit early if it fails
+        try:
+            document_processor = get_document_processor()
+            
+            # Check if the document exists in Neo4j
+            document_exists = False
+            try:
+                if hasattr(document_processor, 'document_exists'):
+                    document_exists = document_processor.document_exists(document_id)
+                    print(f"Document exists in Neo4j: {document_exists}")
+                else:
+                    document_exists = True  # Assume it exists if we can't check
+                    print("document_exists method not available, assuming document exists")
+            except Exception as exists_e:
+                print(f"Error checking if document exists: {str(exists_e)}")
+                document_exists = True  # Assume it exists if check fails
+            
+            # If document exists in Neo4j, try to delete it
+            if document_exists:
+                print(f"Attempting to delete document {document_id} from Neo4j")
+                
+                # Try with clear_document first (for backward compatibility)
+                if hasattr(document_processor, 'clear_document'):
+                    try:
+                        print(f"Using clear_document method")
+                        neo4j_success = document_processor.clear_document(document_id)
+                    except Exception as e:
+                        print(f"Error in clear_document: {str(e)}")
+                        # Fallback to delete_document if clear_document fails
+                        if hasattr(document_processor, 'delete_document'):
+                            print(f"Falling back to delete_document method")
+                            neo4j_success = document_processor.delete_document(document_id)
+                # If no clear_document method, try delete_document directly
+                elif hasattr(document_processor, 'delete_document'):
+                    print(f"Using delete_document method")
+                    neo4j_success = document_processor.delete_document(document_id)
+                else:
+                    print(f"ERROR: Neither clear_document nor delete_document methods found")
+                
+                # Clean up any orphaned nodes if deletion was successful
+                if neo4j_success and hasattr(document_processor, 'clean_orphaned_nodes'):
+                    print(f"Cleaning up orphaned nodes")
+                    try:
+                        orphaned_deleted = document_processor.clean_orphaned_nodes()
+                        if orphaned_deleted > 0:
+                            print(f"Cleaned up {orphaned_deleted} orphaned nodes after document deletion")
+                    except Exception as e:
+                        print(f"Error cleaning orphaned nodes: {str(e)}")
+            else:
+                print(f"Document {document_id} not found in Neo4j")
+        except Exception as neo4j_e:
+            print(f"Error during Neo4j deletion: {str(neo4j_e)}")
+        
+        # Always attempt to delete the RAG index, regardless of Neo4j deletion success
+        print(f"Deleting RAG index for document {document_id}")
         rag_success = delete_document_index(document_id, rag_model)
         
         # Log the deletion status
@@ -182,12 +237,7 @@ def delete_document(document_id):
         }
         print(f"Document deletion results for {document_id}: {results}")
         
-        # Clean up any orphaned nodes that might remain
-        if neo4j_success:
-            orphaned_deleted = document_processor.clean_orphaned_nodes()
-            if orphaned_deleted > 0:
-                print(f"Cleaned up {orphaned_deleted} orphaned nodes after document deletion")
-        
+        # Return success if either operation succeeded
         if neo4j_success or rag_success:
             return jsonify({
                 "message": f"Document {document_id} deleted successfully",
@@ -195,12 +245,13 @@ def delete_document(document_id):
             }), 200
         else:
             return jsonify({
-                "error": f"Document {document_id} not found",
+                "error": f"Failed to delete document {document_id}",
                 "details": results
-            }), 404
+            }), 500
     except Exception as e:
-        print(f"Error in delete_document: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        error_message = str(e)
+        print(f"Error in delete_document: {error_message}")
+        return jsonify({"error": error_message}), 500
 
 @document_bp.route('/documents-with-metadata', methods=['GET'])
 def get_documents_with_metadata():
