@@ -1,0 +1,29 @@
+run pod ubuntu commands.
+1.Go to project working directory - cd /workspace/Production-backend-v0
+2.Create a Virtual Environment - python -m venv venv
+3.activate virtual environment - source venv/bin/activate
+4.Install Dependencies - pip install -r requirements.txt
+5.install poppler - apt-get install -y poppler-utils
+6.python app.py
+
+connect ssh to pod - ssh root@203.57.40.102 -p 10187 -i ~/.ssh/id_ed25519
+upload project to pod - scp -r -P 10187 "E:\SDGP\Production-backend-v0" root@203.57.40.102:/workspace/
+
+Use pod:
+- runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+
+If you need Torchvision and Torchaudio, install versions compatible with PyTorch 2.2.0 + CUDA 12.1.1:
+- pip install torchvision==0.17.0+cu121 torchaudio==2.2.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+
+Steps:
+1.Deploy above mentioned pod and run it.
+2.upload the ml project to pod
+3.connect to pod using ssh 
+4.cd to working directory
+5.install requirements.txt without torch(cause it already comes preconfigured)
+6.manually install torch version dependencies - pip install torchvision==0.17.0+cu121 torchaudio==2.2.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+7.install poppler - apt-get update Then, apt-get install -y poppler-utils
+8.run app.py
+
+
