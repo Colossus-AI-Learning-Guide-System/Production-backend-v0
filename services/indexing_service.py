@@ -62,7 +62,39 @@ def get_indexing_status(document_id):
     Returns:
         Status string: "completed", "in_progress", "failed", or "unknown"
     """
-    return rag_indexing_status.get(document_id, "unknown")
+    # First check the in-memory status
+    status = rag_indexing_status.get(document_id, None)
+    
+    # If status is known, return it
+    if status is not None:
+        return status
+    
+    # If status is unknown, check filesystem for the index
+    try:
+        import os
+        from pathlib import Path
+        
+        # Check common paths for the index
+        index_paths = [
+            os.path.join(".byaldi", document_id),
+            os.path.abspath(os.path.join(".byaldi", document_id)),
+            os.path.join(os.getcwd(), ".byaldi", document_id),
+            str(Path(".byaldi") / document_id)
+        ]
+        
+        for path in index_paths:
+            if os.path.exists(path) and os.path.isdir(path):
+                # If index exists on filesystem but not in memory, consider it completed
+                # and update the in-memory status
+                print(f"Found index directory for {document_id} at {path}, considering it completed")
+                rag_indexing_status[document_id] = "completed"
+                return "completed"
+    
+    except Exception as e:
+        print(f"Error checking filesystem for index {document_id}: {str(e)}")
+    
+    # If we get here, the status is truly unknown
+    return "unknown"
 
 def get_all_available_documents(document_processor):
     """

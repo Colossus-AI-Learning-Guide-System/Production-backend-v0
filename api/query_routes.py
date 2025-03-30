@@ -24,11 +24,31 @@ def handle_query():
         if not document_id:
             return jsonify({"error": "Document ID is required"}), 400
         
-        # Check if indexing is complete
+        # Check if index exists by directly checking the filesystem
+        # rather than relying only on the indexing_status
+        import os
+        from pathlib import Path
+        
+        index_exists = False
+        index_paths = [
+            os.path.join(".byaldi", document_id),
+            os.path.abspath(os.path.join(".byaldi", document_id)),
+            str(Path(".byaldi") / document_id)
+        ]
+        
+        for path in index_paths:
+            if os.path.exists(path) and os.path.isdir(path):
+                index_exists = True
+                print(f"Found index at {path}")
+                break
+        
+        # Get the indexing status as a fallback
         rag_status = get_indexing_status(document_id)
-        if rag_status != "completed":
+        
+        # If index doesn't exist and status isn't completed, return error
+        if not index_exists and rag_status != "completed":
             return jsonify({
-                "error": f"Document {document_id} indexing is not complete",
+                "error": f"Document {document_id} index not found or indexing is not complete",
                 "status": rag_status
             }), 400
 

@@ -116,8 +116,94 @@ def process_query(query, document_id, k, rag_model, force_model='auto', use_loca
     # Choose model based on parameters
     use_pixtral, limited_results, adjusted_k = choose_model_for_query(k, force_model)
     
-    # Query the RAG model with the document-specific index
-    results = rag_model.search(query, k=adjusted_k, index_name=document_id)
+    # First check if the index exists by directly checking the filesystem
+    index_exists = False
+    index_path = None
+    
+    try:
+        import os
+        from pathlib import Path
+        
+        index_paths = [
+            os.path.join(".byaldi", document_id),
+            os.path.abspath(os.path.join(".byaldi", document_id)),
+            os.path.join(os.getcwd(), ".byaldi", document_id),
+            str(Path(".byaldi") / document_id)
+        ]
+        
+        print(f"Checking for index directories for document ID: {document_id}")
+        for path in index_paths:
+            if os.path.exists(path) and os.path.isdir(path):
+                index_exists = True
+                index_path = path
+                print(f"Found index directory at: {path}")
+                break
+                
+        if not index_exists:
+            print(f"WARNING: Could not find index directory for document ID: {document_id}")
+            print(f"Checked paths: {index_paths}")
+    except Exception as e:
+        print(f"Error checking for index directory: {str(e)}")
+    
+    # Load the document-specific index before querying
+    try:
+        print(f"Loading document-specific index for document {document_id}")
+        
+        # Check if this index is already loaded
+        current_index_loaded = False
+        if hasattr(rag_model.model, 'index_name') and rag_model.model.index_name == document_id:
+            print(f"Index for document {document_id} is already loaded, no need to reload")
+            current_index_loaded = True
+            # Search directly without loading
+            results = rag_model.search(query, k=adjusted_k)
+        # If not already loaded, try using the load_index method 
+        elif hasattr(rag_model, 'load_index'):
+            print("Using load_index method")
+            success = rag_model.load_index(document_id)
+            if success:
+                print(f"Successfully loaded index for document {document_id}")
+                # Search without index_name parameter
+                results = rag_model.search(query, k=adjusted_k)
+            else:
+                print(f"Failed to load index with load_index, falling back to from_index method")
+                # Fall back to creating a new instance
+                from models.rag_models import EnhancedRAGMultiModalModel
+                print("Creating new RAGMultiModalModel instance from index")
+                document_rag_model = EnhancedRAGMultiModalModel.from_index(document_id)
+                results = document_rag_model.search(query, k=adjusted_k)
+        else:
+            print(f"rag_model doesn't have load_index method, falling back to from_index method")
+            # Fall back to creating a new instance
+            from models.rag_models import EnhancedRAGMultiModalModel
+            print("Creating new RAGMultiModalModel instance from index")
+            document_rag_model = EnhancedRAGMultiModalModel.from_index(document_id)
+            results = document_rag_model.search(query, k=adjusted_k)
+    except Exception as e:
+        print(f"Error loading document-specific index: {str(e)}")
+        
+        # If we found an index directory but couldn't load the index,
+        # there might be an issue with the index format or compatibility
+        if index_exists:
+            print(f"WARNING: Index directory exists at {index_path} but could not be loaded")
+            
+        print("No passages found in this index or index is corrupted")
+        # Return a meaningful error instead of trying the unsupported method
+        return {
+            "error": "The document index appears to be empty or corrupted. Please try re-uploading the document.",
+            "document_id": document_id
+        }
+    
+    # Check if we have results
+    if not results or len(results) == 0:
+        print(f"WARNING: No results found for query: '{query}'")
+        return {
+            "response": f"I couldn't find any relevant information for your query in the document.",
+            "page_count": 0,
+            "requested_k": k,
+            "limited_results": False,
+            "model_used": "none",
+            "error": "No results found"
+        }
     
     # Process with the appropriate model
     if not use_pixtral or not (settings.HF_API_TOKEN or use_local_pixtral):

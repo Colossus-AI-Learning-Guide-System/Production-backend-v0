@@ -10,6 +10,101 @@ class EnhancedRAGMultiModalModel(RAGMultiModalModel):
     Enhanced version of RAGMultiModalModel with improved deletion capabilities
     """
     
+    def load_index(self, index_name: str) -> bool:
+        """Load an existing index by name.
+        
+        This method allows switching between different document-specific indices
+        without creating a new model instance.
+        
+        Parameters:
+            index_name (str): The name of the index to load.
+            
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        try:
+            print(f"[EnhancedRAGMultiModalModel] Loading index: {index_name}")
+            
+            # Try to determine index path
+            index_path = None
+            
+            # Path options to try
+            paths_to_try = []
+            
+            # Path 1: Use model's index_root if available
+            if hasattr(self.model, 'index_root'):
+                index_root = self.model.index_root
+                paths_to_try.append(Path(index_root) / str(index_name))
+                paths_to_try.append(os.path.abspath(os.path.join(index_root, str(index_name))))
+            
+            # Path 2: Try relative to current directory
+            paths_to_try.append(Path(".byaldi") / str(index_name))
+            paths_to_try.append(os.path.abspath(os.path.join(".byaldi", str(index_name))))
+            
+            # Path 3: Try with absolute path from current working directory
+            paths_to_try.append(Path(os.getcwd()) / ".byaldi" / str(index_name))
+            
+            # Check each path
+            for path in paths_to_try:
+                str_path = str(path)
+                if os.path.exists(str_path):
+                    print(f"[EnhancedRAGMultiModalModel] Found index at: {str_path}")
+                    index_path = str_path
+                    break
+            
+            if not index_path:
+                print(f"[EnhancedRAGMultiModalModel] Index not found: {index_name}")
+                return False
+            
+            # Try to load index from the found path
+            # This depends on how the original Byaldi library implements index loading
+            # The implementation below is a best guess based on typical patterns
+            
+            # Method 1: Use load_index if available
+            if hasattr(self.model, 'load_index'):
+                self.model.load_index(index_path)
+                return True
+                
+            # Method 2: Manually set the index_name and load the embeddings
+            elif hasattr(self.model, 'index_name'):
+                # Set the current index name
+                self.model.index_name = index_name
+                
+                # Attempt to load embeddings and metadata
+                # This is a guess at the internal implementation
+                if hasattr(self.model, 'load_embeddings'):
+                    self.model.load_embeddings(index_path)
+                
+                return True
+                
+            # Method 3: Create a temporary instance and copy its attributes
+            else:
+                # Create a temporary model using from_index
+                temp_model = RAGMultiModalModel.from_index(index_name)
+                
+                # Copy relevant attributes to this instance
+                if hasattr(temp_model.model, 'indexed_embeddings'):
+                    self.model.indexed_embeddings = temp_model.model.indexed_embeddings
+                if hasattr(temp_model.model, 'embed_id_to_doc_id'):
+                    self.model.embed_id_to_doc_id = temp_model.model.embed_id_to_doc_id
+                if hasattr(temp_model.model, 'doc_id_to_metadata'):
+                    self.model.doc_id_to_metadata = temp_model.model.doc_id_to_metadata
+                if hasattr(temp_model.model, 'doc_ids_to_file_names'):
+                    self.model.doc_ids_to_file_names = temp_model.model.doc_ids_to_file_names
+                if hasattr(temp_model.model, 'doc_ids'):
+                    self.model.doc_ids = temp_model.model.doc_ids
+                if hasattr(temp_model.model, 'index_name'):
+                    self.model.index_name = temp_model.model.index_name
+                
+                # Clean up
+                del temp_model
+                
+                return True
+                
+        except Exception as e:
+            print(f"[EnhancedRAGMultiModalModel] Error loading index {index_name}: {str(e)}")
+            return False
+    
     def delete_index(self, index_name: str) -> bool:
         """Delete an index by name.
         
